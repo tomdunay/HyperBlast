@@ -10,30 +10,30 @@ export interface ItemDef {
 
 // unlock = index of the first shop it is offered in (shop index = level*2 + (end ? 1 : 0))
 export const ITEMS: ItemDef[] = [
-  { id: 'power', name: 'POWER UP', price: 350, max: 5, unlock: 0, kind: 'weapon', desc: 'MORE AND FATTER BLASTER BOLTS. STACKS TO FIVE.' },
-  { id: 'spread', name: 'SPREAD SHOT', price: 700, max: 3, unlock: 0, kind: 'weapon', desc: 'ANGLED SIDE BOLTS FROM WING FINS.' },
-  { id: 'side', name: 'SIDE SHOT', price: 550, max: 3, unlock: 0, kind: 'weapon', desc: 'FIRES LEFT AND RIGHT. GREAT IN TUNNELS.' },
-  { id: 'rear', name: 'REAR SHOT', price: 500, max: 3, unlock: 0, kind: 'weapon', desc: 'COVERS YOUR BACKSIDE.' },
-  { id: 'speed', name: 'SPEED UP', price: 400, max: 3, unlock: 0, kind: 'utility', desc: 'BIGGER ENGINES. FASTER SHIP.' },
-  { id: 'halfshield', name: 'HALF SHIELD', price: 350, max: 0, unlock: 0, kind: 'instant', desc: 'RESTORES HALF YOUR SHIELD.' },
-  { id: 'fullshield', name: 'FULL SHIELD', price: 650, max: 0, unlock: 0, kind: 'instant', desc: 'RESTORES ALL OF YOUR SHIELD.' },
-  { id: 'zapper', name: 'ZAPPER', price: 700, max: 5, unlock: 0, kind: 'charge', desc: 'SMART BOMB. HITS EVERYTHING ON SCREEN. KEY X.' },
-  { id: 'cannon', name: 'CANNON', price: 1000, max: 3, unlock: 1, kind: 'weapon', desc: 'SLOW HEAVY SLUGS THAT PUNCH THROUGH SMALL FRY.' },
-  { id: 'dive', name: 'DIVE', price: 600, max: 5, unlock: 1, kind: 'charge', desc: 'DUCK UNDER THE SCENERY FOR A FEW SECONDS. KEY C.' },
-  { id: 'magnet', name: 'CASH MAGNET', price: 750, max: 2, unlock: 1, kind: 'utility', desc: 'PULLS HARD CASH TOWARDS YOU.' },
-  { id: 'laser', name: 'LASER', price: 1300, max: 3, unlock: 2, kind: 'weapon', desc: 'PIERCING BEAM. UPGRADES ADD LENGTH AND WIDTH.' },
-  { id: 'homing', name: 'HOMING MISSILE', price: 1800, max: 3, unlock: 2, kind: 'weapon', desc: 'SEEKS OUT THE NEAREST NASTY.' },
-  { id: 'armour', name: 'ARMOUR', price: 1500, max: 3, unlock: 2, kind: 'utility', desc: 'RAISES MAXIMUM SHIELD BY A QUARTER.' },
-  { id: 'wing', name: 'WING CANNON', price: 1400, max: 2, unlock: 3, kind: 'weapon', desc: 'DIAGONAL CANNONS ON THE WING TIPS.' },
-  { id: 'mines', name: 'MINES', price: 900, max: 2, unlock: 3, kind: 'weapon', desc: 'DROPPED BEHIND YOU. BIG BANG.' },
-  { id: 'autofire', name: 'AUTO FIRE', price: 1500, max: 1, unlock: 3, kind: 'utility', desc: 'HOLD FIRE FOR FULL RATE. SAVES YOUR WRISTS.' },
-  { id: 'electro', name: 'ELECTRO BALL', price: 1800, max: 2, unlock: 4, kind: 'weapon', desc: 'ORBITING SPARK BALLS. HURT ON CONTACT, EAT BULLETS.' },
-  { id: 'flamer', name: 'FLAMETHROWER', price: 1600, max: 2, unlock: 4, kind: 'weapon', desc: 'SHORT RANGE INFERNO. MIND THE PILOT LIGHT.' },
-  { id: 'rapid', name: 'RAPID FIRE', price: 1600, max: 2, unlock: 5, kind: 'utility', desc: 'FASTER TRIGGER FOR EVERY GUN.' },
-  { id: 'drone', name: 'DRONE', price: 2400, max: 2, unlock: 6, kind: 'weapon', desc: 'SATELLITE THAT SHOOTS AND BLOCKS BULLETS.' },
-  { id: 'regen', name: 'REGENERATOR', price: 2200, max: 2, unlock: 6, kind: 'utility', desc: 'SLOWLY REPAIRS YOUR SHIELD.' },
-  { id: 'twister', name: 'TWISTER', price: 2600, max: 2, unlock: 7, kind: 'weapon', desc: 'SPINNING SHOTS IN ALL DIRECTIONS.' },
-  { id: 'life', name: 'EXTRA LIFE', price: 5000, max: 0, unlock: 0, kind: 'instant', desc: 'ONE MORE GO. GORBO TAKES NO RESPONSIBILITY.' },
+  { id: 'power', name: 'POWER UP', price: 350, max: 5, unlock: 0, kind: 'weapon', desc: 'MORE AND FATTER BLASTER BOLTS. STACKS TO FIVE. GORBO CALLS THIS THE GOOD STUFF.' },
+  { id: 'spread', name: 'SPREAD SHOT', price: 700, max: 3, unlock: 0, kind: 'weapon', desc: 'ANGLED SIDE BOLTS FROM WING FINS. COVERS MORE OF THE ROOM THAN YOU DO.' },
+  { id: 'side', name: 'SIDE SHOT', price: 550, max: 3, unlock: 0, kind: 'weapon', desc: 'FIRES LEFT AND RIGHT. GREAT IN TUNNELS. TERRIBLE AT EYE CONTACT.' },
+  { id: 'rear', name: 'REAR SHOT', price: 500, max: 3, unlock: 0, kind: 'weapon', desc: 'COVERS YOUR BACKSIDE. SOMEONE HAS TO. GORBO DID NOT NAME IT.' },
+  { id: 'speed', name: 'SPEED UP', price: 400, max: 3, unlock: 0, kind: 'utility', desc: 'BIGGER ENGINES. FASTER SHIP. GORBO CHARGES BY HOW FAST YOU LEAVE.' },
+  { id: 'halfshield', name: 'HALF SHIELD', price: 350, max: 0, unlock: 0, kind: 'instant', desc: 'RESTORES HALF YOUR SHIELD. THE OTHER HALF IS YOUR PROBLEM.' },
+  { id: 'fullshield', name: 'FULL SHIELD', price: 650, max: 0, unlock: 0, kind: 'instant', desc: 'RESTORES ALL OF YOUR SHIELD. TRY NOT TO LOSE IT IN THE CAR PARK.' },
+  { id: 'zapper', name: 'ZAPPER', price: 700, max: 5, unlock: 0, kind: 'charge', desc: 'SMART BOMB. HITS EVERYTHING ON SCREEN. KEY X. A GROUP ACTIVITY.' },
+  { id: 'cannon', name: 'CANNON', price: 1000, max: 3, unlock: 1, kind: 'weapon', desc: 'SLOW HEAVY SLUGS THAT PUNCH THROUGH SMALL FRY. NO SMALL TALK.' },
+  { id: 'dive', name: 'DIVE', price: 600, max: 5, unlock: 1, kind: 'charge', desc: 'DUCK UNDER THE SCENERY FOR A FEW SECONDS. KEY C. GORBO WATCHES.' },
+  { id: 'magnet', name: 'CASH MAGNET', price: 750, max: 2, unlock: 1, kind: 'utility', desc: 'PULLS HARD CASH TOWARDS YOU. GREED, BUT AERODYNAMIC.' },
+  { id: 'laser', name: 'LASER', price: 1300, max: 3, unlock: 2, kind: 'weapon', desc: 'PIERCING BEAM. UPGRADES ADD LENGTH AND WIDTH. AND CONFIDENCE.' },
+  { id: 'homing', name: 'HOMING MISSILE', price: 1800, max: 3, unlock: 2, kind: 'weapon', desc: 'SEEKS THE NEAREST NASTY. THESE ONES NEVER GHOST YOU.' },
+  { id: 'armour', name: 'ARMOUR', price: 1500, max: 3, unlock: 2, kind: 'utility', desc: 'RAISES MAXIMUM SHIELD BY A QUARTER. LESS OF YOU ON THE WALLS.' },
+  { id: 'wing', name: 'WING CANNON', price: 1400, max: 2, unlock: 3, kind: 'weapon', desc: 'DIAGONAL CANNONS ON THE WING TIPS. FOR THE CORNERS OF THE ROOM.' },
+  { id: 'mines', name: 'MINES', price: 900, max: 2, unlock: 3, kind: 'weapon', desc: 'DROPPED BEHIND YOU. BIG BANG. LEAVE SOMETHING TO REMEMBER.' },
+  { id: 'autofire', name: 'AUTO FIRE', price: 1500, max: 1, unlock: 3, kind: 'utility', desc: 'HOLD FIRE FOR FULL RATE. YOUR WRIST CAN GO BACK TO ITS HOBBIES.' },
+  { id: 'electro', name: 'ELECTRO BALL', price: 1800, max: 2, unlock: 4, kind: 'weapon', desc: 'ORBITING SPARK BALLS. HURT ON CONTACT, EAT BULLETS. SHOWY.' },
+  { id: 'flamer', name: 'FLAMETHROWER', price: 1600, max: 2, unlock: 4, kind: 'weapon', desc: 'SHORT RANGE INFERNO. MIND THE PILOT LIGHT. AND YOUR EYEBROWS.' },
+  { id: 'rapid', name: 'RAPID FIRE', price: 1600, max: 2, unlock: 5, kind: 'utility', desc: 'FASTER TRIGGER FOR EVERY GUN. QUANTITY IS A LOVE LANGUAGE.' },
+  { id: 'drone', name: 'DRONE', price: 2400, max: 2, unlock: 6, kind: 'weapon', desc: 'SATELLITE THAT SHOOTS AND BLOCKS BULLETS. A JEALOUS LITTLE FRIEND.' },
+  { id: 'regen', name: 'REGENERATOR', price: 2200, max: 2, unlock: 6, kind: 'utility', desc: 'SLOWLY REPAIRS YOUR SHIELD. AFTERCARE, SOLD BY THE LEVEL.' },
+  { id: 'twister', name: 'TWISTER', price: 2600, max: 2, unlock: 7, kind: 'weapon', desc: 'SPINNING SHOTS IN ALL DIRECTIONS. NO ANGLE LEFT UNLOVED.' },
+  { id: 'life', name: 'EXTRA LIFE', price: 5000, max: 0, unlock: 0, kind: 'instant', desc: 'ONE MORE GO. GORBO TAKES NO RESPONSIBILITY FOR HOW YOU SPEND IT.' },
 ];
 export const ITEM = Object.fromEntries(ITEMS.map((i) => [i.id, i])) as Record<ItemId, ItemDef>;
 
@@ -67,6 +67,8 @@ export class PlayerState {
   shield = 100;
   load: Loadout = emptyLoadout();
   extraLifeAt = 50000;
+  /** stats for the current level; survive deaths, reset when the level changes */
+  lvStats = { kills: 0, cashEarned: 0, grazes: 0, maxCombo: 0 };
   constructor(id: number) { this.id = id; }
   maxShield() { return 100 + 25 * this.load.armour; }
 }

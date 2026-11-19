@@ -186,6 +186,19 @@ export class FX {
     }
   }
 
+  /** Shockwave refraction rings for the post pass (playfield coordinates), strongest first. */
+  waves(a: number): { x: number; y: number; r: number; s: number }[] {
+    const out: { x: number; y: number; r: number; s: number }[] = [];
+    for (const p of this.pool.list) {
+      if (p.delay > 0) continue;
+      const k = p.t / p.life;
+      const x = p.ox + (p.x - p.ox) * a, y = p.oy + (p.y - p.oy) * a;
+      if (p.kind === 'ring') out.push({ x, y, r: 4 + (p.t + a) * 4.2, s: 5 * (1 - k) });
+      else if (p.kind === 'exp' && p.size >= 1) out.push({ x, y, r: 5 + (p.t + a) * (p.size === 2 ? 3 : 2.2), s: (p.size === 2 ? 3.5 : 2) * (1 - k) });
+    }
+    return out.sort((u, v) => v.s - u.s).slice(0, 8);
+  }
+
   /** Big soft light sources for lighting the scenery (explosions + flashes). */
   drawSceneLight(ctx: Ctx, a: number) {
     for (const p of this.pool.list) {

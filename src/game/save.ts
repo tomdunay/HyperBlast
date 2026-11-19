@@ -7,10 +7,12 @@ export interface Settings {
   music: number; // 0..10
   sfx: number; // 0..10
   crt: boolean;
+  /** WebGL bloom + post effects */
+  bloom: boolean;
   bindings: Record<Action, string[]>;
   levelMode: 'classic' | 'random';
   seed: number;
-  screen: 'fill' | 'stretch' | 'integer';
+  screen: 'fill' | 'classic' | 'integer';
   /** true once the player picks a screen mode in Options */
   screenChosen?: boolean;
 }
@@ -20,7 +22,7 @@ const KEY_S = 'hyperblast.settings', KEY_H = 'hyperblast.hiscores';
 
 export function loadSettings(): Settings {
   const d: Settings = {
-    difficulty: 1, players: 1, music: 7, sfx: 8, crt: false, bindings: JSON.parse(JSON.stringify(DEFAULT_BINDINGS)),
+    difficulty: 1, players: 1, music: 7, sfx: 8, crt: false, bloom: true, bindings: JSON.parse(JSON.stringify(DEFAULT_BINDINGS)),
     levelMode: 'classic', seed: (Date.now() * 2654435761) >>> 0, screen: 'fill',
   };
   try {
@@ -28,6 +30,8 @@ export function loadSettings(): Settings {
     if (s) Object.assign(d, s, { bindings: { ...d.bindings, ...(s.bindings || {}) } });
     // a 'stretch' saved by the old default (not chosen in Options) migrates to the new 'fill' default
     if (s && !s.screenChosen) d.screen = 'fill';
+    // 'stretch' was removed: nothing stretches the image any more
+    if ((d.screen as string) === 'stretch' || !['fill', 'classic', 'integer'].includes(d.screen)) d.screen = 'fill';
   } catch { /* ignore */ }
   input.bindings = d.bindings;
   return d;

@@ -1,5 +1,5 @@
 // Top-level state machine: Title (+attract demo, hi-scores, credits) → Intro → Play ⇄ Shop → … → GameOver / Ending → Name entry.
-import { Ctx, makeCanvas, rnd } from '../engine/gfx';
+import { Ctx, makeCanvas, rnd, fbm, bayer } from '../engine/gfx';
 import { input, REMAPPABLE, DEFAULT_BINDINGS, Action } from '../engine/input';
 import { audio } from '../engine/audio';
 import { text, makeLogo, wrap, FontStyle } from '../engine/font';
@@ -8,9 +8,12 @@ import { ditherFade, drawGlow } from '../engine/light';
 import { buildLevel, LEVEL_COUNT, hexSeed, LevelMode } from '../levels';
 import { ensureBossArt } from './bosses';
 import { LevelDef, W, H } from './types';
+import { VIEW, MARGIN, fillView } from '../engine/view';
+import { postFx } from '../engine/post';
 import { World, Host } from './World';
 import { Shop } from './Shop';
 import { PlayerState } from './items';
+import { comboRank, gameOverLine, levelQuip, pauseLine, statsLine, titleTag } from './sauce';
 import { Settings, loadSettings, saveSettings, loadHi, qualifies, insertHi } from './save';
 
 interface Scene { update(): void; render(ctx: Ctx, a: number): void }
@@ -33,7 +36,7 @@ const CREDITS = 'HYPERBLAST  ***  AN ORIGINAL VERTICAL SHOOT-EM-UP  ***  EVERY P
   'ARROWS OR WASD TO MOVE  -  SPACE OR Z TO FIRE (TAP FOR SPEED)  -  X ZAPPER  -  C DIVE  -  P PAUSE  ***  ' +
   'HOLD DOWN AT THE BOTTOM OF THE SCREEN TO REVERSE THE SCROLL  ***  SPEND YOUR HARD CASH AT GORBO\'S TRADE HUT  ***  ' +
   'FIFTEEN BOMBS. THIRTY GUARDIANS. ONE STRIKEBLASTER.  ***  TRY RANDOMISER MODE IN OPTIONS AND SHARE YOUR SEED  ***  ' +
-  'GREETINGS TO EVERYONE WHO EVER WORE OUT A JOYSTICK  ***       ';
+  'GREETINGS TO EVERYONE WHO EVER WORE OUT A JOYSTICK  ***  FLY CLOSE TO FILL THE SAUCE  ***  GORBO IS WATCHING, AND CHARGING  ***       ';
 
 export class Game {
   settings: Settings = loadSettings();
@@ -78,12 +81,13 @@ export class Game {
   regenLevel() {
     this.regenOffset++;
     const ps = this.ps; ps.checkpoint = 0; ps.midDone = false;
+    ps.lvStats = { kills: 0, cashEarned: 0, grazes: 0, maxCombo: 0 };
     this.beginLevel();
   }
 
   applySettings() {
     audio.setVolumes(this.settings.music / 10, this.settings.sfx / 10);
-    document.getElementById('crt')?.classList.toggle('on', this.settings.crt);
+    document.getElementById('crt')?.classList.toggle('on', this.settings.crt && !(window as any).postOk);
     input.bindings = this.settings.bindings;
     saveSettings(this.settings);
     (window as any).resizeGame?.();
@@ -97,7 +101,13 @@ export class Game {
     this.scene.update();
   }
   render(ctx: Ctx, a: number) {
+    postFx.waves = []; postFx.aberr = 0; postFx.bloomBoost = 1;
+    ctx.save();
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VIEW.w, H);
+    // scenes draw in playfield coordinates; the wider view extends either side of x = 0..320
+    ctx.translate(VIEW.ox, 0);
     this.scene.render(ctx, a);
+    ctx.restore();
     const f = ditherFade(this.fadeT);
     if (f) ctx.drawImage(f, 0, 0);
   }
@@ -163,10 +173,14 @@ export class Game {
   onLevelDone() {
     const ps = this.ps;
     if (ps.level >= LEVEL_COUNT - 1) { this.scene = new EndingScene(this); return; }
-    this.scene = new ShopScene(new Shop(ps, ps.level * 2 + 1, true, () => {
-      ps.level++; ps.checkpoint = 0; ps.midDone = false;
-      this.intro(true);
-    }));
+    const w = this.world!;
+    this.scene = new StatsScene(this, w, () => {
+      this.scene = new ShopScene(new Shop(ps, ps.level * 2 + 1, true, () => {
+        ps.level++; ps.checkpoint = 0; ps.midDone = false;
+        ps.lvStats = { kills: 0, cashEarned: 0, grazes: 0, maxCombo: 0 };
+        this.intro(true);
+      }));
+    });
   }
 
   gameOver() {
@@ -185,14 +199,40 @@ export class Game {
 
 // =================================================================== scenes
 const STAR_COLS = ['#ffffff', '#ccddff', '#8899cc', '#556688', '#334455'];
+let spaceC: HTMLCanvasElement | null = null;
+/** Deep-space backdrop: dark gradient with dithered, 12-bit quantised nebula clouds (wraps every 64 px sideways). */
+function spaceBackdrop() {
+  if (spaceC) return spaceC;
+  const w = 320 + MARGIN * 2 + 64;
+  const [c, x] = makeCanvas(w, H);
+  const img = x.createImageData(w, H);
+  const d = img.data;
+  const P = 512; // horizontal period of the cloud noise so the drift wraps
+  for (let y = 0; y < H; y++) for (let px = 0; px < w; px++) {
+    const u = px % P;
+    const n = fbm(u * 0.012, y * 0.016, 41, 4) * (1 - u / P) + fbm((u - P) * 0.012, y * 0.016, 41, 4) * (u / P);
+    const m = fbm(u * 0.03 + 9, y * 0.03, 77, 3);
+    const k = Math.max(0, n - 0.42) * 2.6 + bayer(px, y) * 0.12;
+    const g = y / H;
+    let r = 2 + g * 16, gg = 1 + g * 4, b = 10 + g * 26;
+    r += k * (90 * m + 40); gg += k * 30 * (1 - m); b += k * (140 - 60 * m);
+    const q = (v: number) => Math.min(255, Math.round(v / 17) * 17);
+    const i = (y * w + px) * 4;
+    d[i] = q(r); d[i + 1] = q(gg); d[i + 2] = q(b); d[i + 3] = 255;
+  }
+  x.putImageData(img, 0, 0);
+  spaceC = c;
+  return c;
+}
 /** Perspective (3D) starfield flying towards the viewer. */
 function drawStars(ctx: Ctx, t: number) {
-  ctx.fillStyle = '#000006'; ctx.fillRect(0, 0, W, H);
-  for (let i = 0; i < 160; i++) {
-    const sx = ((i * 7919) % 1000) / 500 - 1, sy = ((i * 104729) % 1000) / 500 - 1;
+  ctx.drawImage(spaceBackdrop(), -VIEW.ox - Math.round((t * 0.15) % 64), 0);
+  const n = Math.round(160 * VIEW.w / 320), sw = VIEW.w / 320;
+  for (let i = 0; i < n; i++) {
+    const sx = (((i * 7919) % 1000) / 500 - 1) * sw, sy = ((i * 104729) % 1000) / 500 - 1;
     const z = Math.max(0.03, 1 - ((((i * 37) % 100) / 100 + t * 0.0035) % 1));
     const px = 160 + (sx / z) * 70, py = 128 + (sy / z) * 70;
-    if (px < 0 || py < 0 || px >= W || py >= H) continue;
+    if (px < -VIEW.ox || py < 0 || px >= W + VIEW.ox || py >= H) continue;
     ctx.fillStyle = STAR_COLS[Math.min(4, Math.floor(z * 5))];
     const s = z < 0.2 ? 2 : 1;
     ctx.fillRect(Math.round(px), Math.round(py), s, s);
@@ -208,7 +248,7 @@ const COPPER = [
 function copperBars(ctx: Ctx, t: number, y0: number, span: number) {
   COPPER.forEach((bar, i) => {
     const y = Math.round(y0 + Math.sin(t * 0.035 + i * 2.1) * span);
-    bar.forEach((c, k) => { ctx.fillStyle = c; ctx.fillRect(0, y + k * 2, W, 2); });
+    bar.forEach((c, k) => { ctx.fillStyle = c; ctx.fillRect(-VIEW.ox, y + k * 2, VIEW.w, 2); });
   });
 }
 
@@ -292,7 +332,7 @@ class TitleScene implements Scene {
     ctx.scale(1, -0.3);
     ctx.drawImage(fc, 0, 0);
     ctx.restore();
-    text(ctx, 'THE STRIKEBLASTER RETURNS', 160, 88, 'cyan', 1, 0.5);
+    text(ctx, titleTag(this.t), 160, 88, 'cyan', 1, 0.5);
     // ship sways and banks
     const shx = 160 + Math.sin(this.t * 0.025) * 50, vx = Math.cos(this.t * 0.025);
     const fr = SF.ship[Math.max(0, Math.min(4, Math.round(vx * 2) + 2))];
@@ -312,8 +352,8 @@ class TitleScene implements Scene {
     text(ctx, `${this.g.settings.players}P  ${diff}  ${mode}`, 160, 202, 'grey', 1, 0.5);
     // scrolling credits
     const cw = CREDITS.length * 6;
-    const x = 320 - ((this.t * 1.5) % (cw + 320));
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 226, W, 14);
+    const x = W + VIEW.ox - ((this.t * 1.5) % (cw + VIEW.w));
+    fillView(ctx, '#000', 226, 14);
     text(ctx, CREDITS, x, 229, 'chrome');
     text(ctx, '(C) 2026 HYPERBLAST - ORIGINAL GAME', 160, 245, 'grey', 1, 0.5);
   }
@@ -332,7 +372,8 @@ class OptionsScene implements Scene {
       ['MUSIC VOLUME', '#'.repeat(s.music) + '.'.repeat(10 - s.music)],
       ['SFX VOLUME', '#'.repeat(s.sfx) + '.'.repeat(10 - s.sfx)],
       ['CRT FILTER', s.crt ? 'ON' : 'OFF'],
-      ['SCREEN', { fill: 'FILL', stretch: 'STRETCH', integer: 'PIXEL PERFECT' }[s.screen]],
+      ['BLOOM GLOW', (window as any).postOk ? (s.bloom ? 'ON' : 'OFF') : 'N/A'],
+      ['SCREEN', { fill: 'WIDE FILL', classic: 'CLASSIC 5:4', integer: 'PIXEL PERFECT' }[s.screen]],
       ['LEVELS', s.levelMode === 'classic' ? 'CLASSIC' : 'RANDOMISER'],
       ['SEED', hexSeed(s.seed)],
       ['REROLL SEED', '>'],
@@ -360,7 +401,7 @@ class OptionsScene implements Scene {
     if (input.p('down')) { this.sel = (this.sel + 1) % n; audio.play('menu'); }
     const d = (input.p('right') ? 1 : 0) - (input.p('left') ? 1 : 0);
     const go = input.p('confirm') || input.p('fire');
-    for (const c of input.clicks) { const i = Math.floor((c.y - 38) / 15); if (i >= 0 && i < n) { this.sel = i; this.change(1, true); return; } }
+    for (const c of input.clicks) { const i = Math.floor((c.y - 36) / 14); if (i >= 0 && i < n) { this.sel = i; this.change(1, true); return; } }
     if (d || go) this.change(d || 1, go);
     if (input.p('back')) { this.g.applySettings(); this.g.toTitle(); }
   }
@@ -372,12 +413,13 @@ class OptionsScene implements Scene {
       case 2: s.music = Math.max(0, Math.min(10, s.music + d)); break;
       case 3: s.sfx = Math.max(0, Math.min(10, s.sfx + d)); break;
       case 4: s.crt = !s.crt; break;
-      case 5: { const m = ['fill', 'stretch', 'integer'] as const; s.screen = m[(m.indexOf(s.screen) + d + 3) % 3]; s.screenChosen = true; break; }
-      case 6: s.levelMode = s.levelMode === 'classic' ? 'random' : 'classic'; break;
-      case 7: if (go) { this.digit = 0; input.charQueue.length = 0; } break;
-      case 8: s.seed = (Math.random() * 2 ** 32) >>> 0; s.levelMode = 'random'; break;
-      case 9: if (go) { this.g.scene = new ControlsScene(this.g); return; } break;
-      case 10: if (go) { this.g.applySettings(); this.g.toTitle(); return; } break;
+      case 5: s.bloom = !s.bloom; break;
+      case 6: { const m = ['fill', 'classic', 'integer'] as const; s.screen = m[(m.indexOf(s.screen) + d + 3) % 3]; s.screenChosen = true; break; }
+      case 7: s.levelMode = s.levelMode === 'classic' ? 'random' : 'classic'; break;
+      case 8: if (go) { this.digit = 0; input.charQueue.length = 0; } break;
+      case 9: s.seed = (Math.random() * 2 ** 32) >>> 0; s.levelMode = 'random'; break;
+      case 10: if (go) { this.g.scene = new ControlsScene(this.g); return; } break;
+      case 11: if (go) { this.g.applySettings(); this.g.toTitle(); return; } break;
     }
     audio.play('select');
     this.g.applySettings();
@@ -387,12 +429,12 @@ class OptionsScene implements Scene {
     text(ctx, 'OPTIONS', 160, 24, 'gold', 2, 0.5);
     this.rows().forEach(([k, v], i) => {
       const s = i === this.sel;
-      const y = 38 + i * 15;
+      const y = 36 + i * 14;
       text(ctx, k, 40, y, s ? 'gold' : 'metal');
       text(ctx, v, 280, y, s ? 'cyan' : 'grey', 1, 1);
-      if (i === 7 && this.digit >= 0 && this.t % 20 < 14) { ctx.fillStyle = '#ffcc22'; ctx.fillRect(280 - 48 + this.digit * 6, y + 8, 5, 1); }
+      if (i === 8 && this.digit >= 0 && this.t % 20 < 14) { ctx.fillStyle = '#ffcc22'; ctx.fillRect(280 - 48 + this.digit * 6, y + 8, 5, 1); }
     });
-    const help = this.digit >= 0 ? 'UP/DOWN OR TYPE 0-F  -  ENTER DONE' : this.sel === 7 ? 'ENTER TO EDIT THE SEED' : this.sel === 5 ? 'F KEY TOGGLES FULLSCREEN' : 'LEFT/RIGHT CHANGE  -  ESC BACK';
+    const help = this.digit >= 0 ? 'UP/DOWN OR TYPE 0-F  -  ENTER DONE' : this.sel === 8 ? 'ENTER TO EDIT THE SEED' : this.sel === 6 ? 'F KEY TOGGLES FULLSCREEN' : this.sel === 5 ? 'NEON LIGHT BLEED AND SHOCKWAVES' : 'LEFT/RIGHT CHANGE  -  ESC BACK';
     text(ctx, help, 160, 214, 'grey', 1, 0.5);
     if (this.g.settings.levelMode === 'random') text(ctx, 'ALL 15 LEVELS ARE GENERATED FROM THE SEED', 160, 228, 'cyan', 1, 0.5);
     else text(ctx, 'LEVELS 1-5 HAND MADE, 6-15 OFFICIAL GENERATED', 160, 228, 'grey', 1, 0.5);
@@ -447,30 +489,33 @@ class ControlsScene implements Scene {
 
 class IntroScene implements Scene {
   t = 0;
+  name: string;
+  quip: string;
   constructor(private g: Game, private ps: PlayerState, private done: () => void) {
     audio.stopMusic();
     this.name = g.getLevel(ps.level).name; // build (and cache) the level during the card
+    this.quip = levelQuip(this.name);
   }
-  name: string;
-  update() { if (++this.t > 170 || (this.t > 30 && (input.p('fire') || input.p('confirm')))) this.done(); }
+  update() { if (++this.t > 190 || (this.t > 30 && (input.p('fire') || input.p('confirm')))) this.done(); }
   render(ctx: Ctx) {
     drawStars(ctx, this.t * 3);
     const lv = this.ps.level;
-    if (this.g.players.length > 1) text(ctx, 'PLAYER ' + this.ps.id, 160, 50, 'cyan', 2, 0.5);
-    text(ctx, `LEVEL ${lv + 1}/${LEVEL_COUNT}`, 160, 90, 'gold', 3, 0.5);
-    text(ctx, this.name, 160, 128, 'chrome', this.name.length > 26 ? 1 : 2, 0.5);
+    if (this.g.players.length > 1) text(ctx, 'PLAYER ' + this.ps.id, 160, 44, 'cyan', 2, 0.5);
+    text(ctx, `LEVEL ${lv + 1}/${LEVEL_COUNT}`, 160, 78, 'gold', 3, 0.5);
+    text(ctx, this.name, 160, 118, 'chrome', this.name.length > 26 ? 1 : 2, 0.5);
     const sl = this.g.seedLabel();
-    if (sl) text(ctx, 'RANDOMISER SEED ' + sl, 160, 150, 'cyan', 1, 0.5);
-    if (this.t > 60 && this.t % 30 < 20) text(ctx, 'GET READY', 160, 170, 'metal', 1, 0.5);
+    if (sl) text(ctx, 'RANDOMISER SEED ' + sl, 160, 142, 'cyan', 1, 0.5);
+    wrap(this.quip, 48).slice(0, 2).forEach((l, i) => text(ctx, l, 160, (sl ? 160 : 150) + i * 10, 'purple', 1, 0.5));
+    if (this.t > 60 && this.t % 30 < 20) text(ctx, 'GET READY', 160, 188, 'metal', 1, 0.5);
     text(ctx, `LIVES ${this.ps.lives}   CASH $${this.ps.cash}   SCORE ${this.ps.score}`, 160, 220, 'grey', 1, 0.5);
   }
 }
 
 class PlayScene implements Scene {
-  paused = false; psel = 0;
+  paused = false; psel = 0; quip = '';
   constructor(private g: Game, private w: World) {}
   update() {
-    if (input.p('pause') && !this.paused) { this.paused = true; this.psel = 0; audio.play('menu'); return; }
+    if (input.p('pause') && !this.paused) { this.paused = true; this.psel = 0; this.quip = pauseLine(); audio.play('menu'); return; }
     if (this.paused) {
       if (input.p('up') || input.p('down')) { this.psel ^= 1; audio.play('menu'); }
       if (input.p('pause') || input.p('back')) this.paused = false;
@@ -485,10 +530,11 @@ class PlayScene implements Scene {
   render(ctx: Ctx, a: number) {
     this.w.render(ctx, this.paused ? 1 : a);
     if (this.paused) {
-      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H);
+      fillView(ctx, 'rgba(0,0,0,0.6)');
       text(ctx, 'PAUSED', 160, 90, 'gold', 2, 0.5);
       text(ctx, (this.psel === 0 ? '> ' : '  ') + 'RESUME', 160, 124, this.psel === 0 ? 'gold' : 'metal', 1, 0.5);
       text(ctx, (this.psel === 1 ? '> ' : '  ') + 'QUIT TO TITLE', 160, 138, this.psel === 1 ? 'gold' : 'metal', 1, 0.5);
+      wrap(this.quip, 40).forEach((l, i) => text(ctx, l, 160, 168 + i * 10, 'purple', 1, 0.5));
     }
   }
 }
@@ -501,14 +547,16 @@ class ShopScene implements Scene {
 
 class GameOverScene implements Scene {
   t = 0;
-  constructor(private g: Game) { audio.playMusic('gameover'); }
+  line: string;
+  constructor(private g: Game) { this.line = gameOverLine(); audio.playMusic('gameover'); }
   update() { if (++this.t > 300 || (this.t > 60 && (input.p('fire') || input.p('confirm')))) this.g.hiScoreEntries(); }
   render(ctx: Ctx) {
     drawStars(ctx, this.t * 0.3);
     const k = Math.min(1, this.t / 60);
-    text(ctx, 'GAME', 160, 70 + (1 - k) * -80, 'red', 4, 0.5);
-    text(ctx, 'OVER', 160, 110 + (1 - k) * 160, 'red', 4, 0.5);
-    this.g.players.forEach((p, i) => text(ctx, (this.g.players.length > 1 ? 'PLAYER ' + p.id + '  ' : 'SCORE ') + p.score, 160, 170 + i * 12, 'gold', 1, 0.5));
+    text(ctx, 'GAME', 160, 64 + (1 - k) * -80, 'red', 4, 0.5);
+    text(ctx, 'OVER', 160, 104 + (1 - k) * 160, 'red', 4, 0.5);
+    if (k >= 1) text(ctx, this.line, 160, 148, 'purple', 1, 0.5);
+    this.g.players.forEach((p, i) => text(ctx, (this.g.players.length > 1 ? 'PLAYER ' + p.id + '  ' : 'SCORE ') + p.score, 160, 174 + i * 12, 'gold', 1, 0.5));
   }
 }
 
@@ -543,12 +591,49 @@ class NameEntryScene implements Scene {
       text(ctx, c, x, 140, i === this.pos ? 'gold' : 'metal', 3);
       if (i === this.pos && this.t % 20 < 12) { ctx.fillStyle = '#ffcc22'; ctx.fillRect(x, 166, 15, 2); }
     });
+    text(ctx, 'SIGN THE BOOK. GORBO IS WATCHING.', 160, 196, 'purple', 1, 0.5);
     text(ctx, 'UP/DOWN OR TYPE  -  FIRE TO CONFIRM', 160, 220, 'grey', 1, 0.5);
   }
 }
 
-const ENDING = "WELL WELL. ALL FIFTEEN BOMBS DEFUSED. GORBO IS... MILDLY IMPRESSED. GORBO WOULD GIVE YOU A MEDAL BUT MEDALS COST MONEY. " +
-  'THERE IS NO SECRET LEVEL. THERE IS NO PARADE. GORBO IS CLOSING THE HUT FOR THE NIGHT. BE A DEAR AND TURN OUT THE LIGHTS ON YOUR WAY OUT.';
+const ENDING = "WELL WELL. ALL FIFTEEN BOMBS DEFUSED. GORBO IS... MILDLY AROUSED. PROFESSIONALLY. GORBO WOULD GIVE YOU A MEDAL BUT MEDALS COST MONEY AND YOU ALREADY GOT THE LOOK. " +
+  'THERE IS NO SECRET LEVEL. THERE IS NO PARADE. THERE IS A BACK ROOM, AND IT IS CLOSED. TURN OUT THE LIGHTS ON YOUR WAY OUT, TROUBLEMAKER.';
+
+class StatsScene implements Scene {
+  t = 0;
+  quip: string;
+  stats: { kills: number; cashEarned: number; grazes: number; maxCombo: number; levelBonus: number };
+  constructor(private g: Game, w: World, private done: () => void) {
+    this.stats = { kills: w.stats.kills, cashEarned: w.stats.cashEarned, grazes: w.stats.grazes, maxCombo: w.stats.maxCombo, levelBonus: (w.lv.idx + 1) * 5000 };
+    this.quip = statsLine(this.stats.kills, this.stats.grazes, this.stats.maxCombo);
+  }
+  update() {
+    this.t++;
+    if (this.t > 350 || (this.t > 60 && (input.p('fire') || input.p('confirm')))) this.done();
+  }
+  render(ctx: Ctx) {
+    drawStars(ctx, this.t);
+    copperBars(ctx, this.t, 46, 20);
+    text(ctx, 'LEVEL COMPLETE', 160, 36, 'gold', 2, 0.5);
+    const s = this.stats;
+    const rows: [string, string][] = [
+      ['ENEMIES DESTROYED', String(s.kills)],
+      ['CASH EARNED', '$' + s.cashEarned],
+      ['BEST COMBO', s.maxCombo >= 3 ? 'x' + s.maxCombo + '  ' + comboRank(s.maxCombo) : '-'],
+      ['GRAZES', String(s.grazes)],
+      ['LEVEL BONUS', String(s.levelBonus)],
+    ];
+    rows.forEach(([k, v], i) => {
+      const show = Math.max(0, this.t - 30 - i * 12);
+      if (show <= 0) return;
+      const y = 76 + i * 22;
+      text(ctx, k, 56, y, 'metal');
+      text(ctx, v, 268, y, i === 4 ? 'gold' : 'cyan', 1, 1);
+    });
+    if (this.t > 100) wrap(this.quip, 46).forEach((l, i) => text(ctx, l, 160, 192 + i * 10, 'purple', 1, 0.5));
+    if (this.t > 110 && this.t % 30 < 20) text(ctx, 'PRESS FIRE', 160, 222, 'gold', 1, 0.5);
+  }
+}
 class EndingScene implements Scene {
   t = 0; shop: Shop;
   constructor(private g: Game) {
@@ -562,14 +647,14 @@ class EndingScene implements Scene {
     if (this.t > 200 && (input.p('fire') || input.p('confirm'))) this.g.hiScoreEntries();
   }
   render(ctx: Ctx) {
-    ctx.fillStyle = '#0a0614'; ctx.fillRect(0, 0, W, H);
+    fillView(ctx, '#0a0614');
     // lights dim over time
     this.shop.drawGorbo(ctx, 160, 70);
     ctx.fillStyle = '#aa7744'; ctx.fillRect(60, 102, 200, 12);
     const shown = Math.min(ENDING.length, Math.floor(this.t / 2));
     wrap(ENDING.slice(0, shown), 46).forEach((l, i) => text(ctx, l, 22, 130 + i * 10, 'metal'));
     const dim = Math.max(0, Math.min(0.85, (this.t - 700) / 300));
-    if (dim > 0) { ctx.fillStyle = `rgba(0,0,0,${dim})`; ctx.fillRect(0, 0, W, H); }
+    if (dim > 0) fillView(ctx, `rgba(0,0,0,${dim})`);
     if (this.t > 200 && this.t % 40 < 28) text(ctx, 'FINAL SCORE ' + this.g.ps.score + '  -  PRESS FIRE', 160, 238, 'gold', 1, 0.5);
     if (this.t > 1000) text(ctx, 'CLICK.', 160, 120, 'grey', 1, 0.5);
   }

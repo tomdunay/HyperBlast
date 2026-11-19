@@ -1,11 +1,13 @@
 // Gorbo's Trade Hut: buy / sell (half price) / paid advice, with an animated sarcastic shopkeeper.
 import { Ctx, makeCanvas, rnd, bayer, fbm } from '../engine/gfx';
 import { drawGlow } from '../engine/light';
+import { VIEW, fillView } from '../engine/view';
 import { input } from '../engine/input';
 import { audio } from '../engine/audio';
 import { text, wrap } from '../engine/font';
 import { S, SF, renderShapes, Spr } from '../art/sprites';
-import { ITEMS, ItemDef, PlayerState, buyPrice, sellPrice } from './items';
+import { ITEMS, ItemDef, ItemId, PlayerState, buyPrice, sellPrice } from './items';
+import { pick } from './sauce';
 
 const GREET = [
   "WELCOME TO GORBO'S TRADE HUT. TOUCH NOTHING YOU CAN'T AFFORD.",
@@ -13,26 +15,81 @@ const GREET = [
   'BUY SOMETHING SHINY. YOUR SHIP LOOKS LIKE A TOASTER.',
   'NO REFUNDS. NO GUARANTEES. NO SHIRT, NO SERVICE.',
   'GORBO HAS GUNS. YOU HAVE CASH. LET\'S DANCE.',
+  'WELCOME IN. WIPE YOUR FEET AND YOUR CONSCIENCE.',
+  'OH GOOD. A PILOT WITH POCKETS. OPEN THEM.',
+  'GORBO SAW YOU OUT THERE. BOLD. EXPENSIVE. CONTINUE.',
+  'THE HUT IS OPEN. THE INNUENDO IS COMPLIMENTARY.',
+  'YOU SMELL LIKE GUNPOWDER AND BAD DECISIONS. PERFECT.',
 ];
-const BUY = ['EXCELLENT CHOICE. GORBO APPROVES OF YOUR MONEY.', 'SOLD! NO TAKE-BACKS. WELL, HALF TAKE-BACKS.', 'BOLT IT ON YOURSELF, GORBO IS ON BREAK.', 'THAT ONE ONLY EXPLODED IN TESTING TWICE.', 'KA-CHING. MUSIC TO ALL SIX OF MY EARS.'];
-const POOR = ['YOU CAN\'T AFFORD THAT. GO SHOOT MORE THINGS.', 'GORBO DOES NOT DO CREDIT. GORBO DOES DO LAUGHING.', 'COME BACK WHEN YOUR WALLET HAS HIT PUBERTY.'];
-const SELL = ['GORBO WILL TAKE THAT OFF YOUR HANDS. AT HALF PRICE, OBVIOUSLY.', 'A BIT SCRATCHED, BUT GORBO IS GENEROUS.', 'SOLD BACK. GORBO WILL POLISH IT AND CHARGE DOUBLE.'];
-const MAXED = ['YOU ALREADY HAVE ALL OF THOSE. GREEDY.', 'ANY MORE AND YOUR SHIP WILL FALL OVER.'];
-const LOCKED = ['THAT\'S OUT OF STOCK. TRY A LATER HUT.', 'NOT FOR SALE TO BEGINNERS. COME BACK LATER.'];
+const BUY = [
+  'EXCELLENT CHOICE. GORBO APPROVES OF YOUR MONEY.',
+  'SOLD! NO TAKE-BACKS. WELL, HALF TAKE-BACKS.',
+  'BOLT IT ON YOURSELF, GORBO IS ON BREAK.',
+  'THAT ONE ONLY EXPLODED IN TESTING TWICE.',
+  'KA-CHING. MUSIC TO ALL SIX OF MY EARS.',
+  'SOLD. TRY TO LOOK LIKE YOU MEANT TO BUY THAT.',
+  'BEAUTIFUL. GORBO WILL PRETEND THIS WAS YOUR IDEA.',
+  'MONEY GONE. DIGNITY OPTIONAL. THE GUN STAYS.',
+];
+const BUY_FOR: Partial<Record<ItemId, string[]>> = {
+  rear: ['REAR SHOT. THE PILOTS NAMED IT. GORBO JUST TOOK THE MONEY.', 'COVERS YOUR BACKSIDE. SOMEONE HAD TO.'],
+  dive: ['DIVE BOUGHT. GOING DOWN IS NOW A FEATURE.', 'A FEW SECONDS UNDER. DO NOT NARRATE IT OUT LOUD.'],
+  flamer: ['FLAMETHROWER. FOR WHEN TALKING IS OVER.', 'MIND THE PILOT LIGHT. AND ANYONE STANDING NEARBY.'],
+  life: ['ANOTHER LIFE. GORBO CANNOT SELL YOU TASTE.', 'EXTRA LIFE. WASTE IT CREATIVELY.'],
+  magnet: ['CASH MAGNET. GREED, BUT MAKE IT CUTE.'],
+  armour: ['MORE ARMOUR. LESS OF YOU SMEARED ON THE WALLS.'],
+  autofire: ['AUTO FIRE. YOUR WRIST CAN GO BACK TO ITS OTHER HOBBIES.'],
+  homing: ['HOMING MISSILES. COMMITTED. UNLIKE MOST PILOTS.'],
+  speed: ['FASTER. GORBO CHARGES BY HOW QUICKLY YOU LEAVE.'],
+  zapper: ['A SMART BOMB FOR DUMB SITUATIONS. YOU TWO WILL GET ON.'],
+  laser: ['A LASER. LONG, RUDE, AND IMPOSSIBLE TO IGNORE.'],
+  regen: ['REGENERATOR. AFTERCARE, WITH A RECEIPT.'],
+};
+const POOR = [
+  'YOU CAN\'T AFFORD THAT. GO SHOOT MORE THINGS.',
+  'GORBO DOES NOT DO CREDIT. GORBO DOES DO LAUGHING.',
+  'COME BACK WHEN YOUR WALLET HAS HIT PUBERTY.',
+  'YOUR WALLET IS LIMP. TRAGIC. FIX IT OUTSIDE.',
+  'COME BACK WHEN YOU CAN AFFORD TO BE INTERESTING.',
+  'NO LAYAWAY. GORBO DOES JUDGMENT INSTEAD.',
+];
+const SELL = [
+  'GORBO WILL TAKE THAT OFF YOUR HANDS. AT HALF PRICE, OBVIOUSLY.',
+  'A BIT SCRATCHED, BUT GORBO IS GENEROUS.',
+  'SOLD BACK. GORBO WILL POLISH IT AND CHARGE DOUBLE.',
+  'SOLD BACK. STILL WARM. GORBO WILL NOT ASK WHY.',
+  'HALF PRICE. FULL SHAME. A FAIR TRADE.',
+];
+const MAXED = [
+  'YOU ALREADY HAVE ALL OF THOSE. GREEDY.',
+  'ANY MORE AND YOUR SHIP WILL FALL OVER.',
+  'ANY MORE AND THE SHIP NEEDS A SAFE WORD.',
+  'YOU ARE FULL. GORBO RESPECTS THE APPETITE.',
+];
+const LOCKED = [
+  'THAT\'S OUT OF STOCK. TRY A LATER HUT.',
+  'NOT FOR SALE TO BEGINNERS. COME BACK LATER.',
+  'NOT YET. ANTICIPATION IS FREE. THIS IS NOT.',
+  'LATER, DARLING. GORBO LIKES A SLOW BURN.',
+];
 const ADVICE = [
   'HOLD DOWN AT THE BOTTOM OF THE SCREEN TO SCROLL BACKWARDS. GREAT FOR GRABBING CASH YOU MISSED.',
   'TAPPING FIRE IS FASTER THAN HOLDING IT. UNLESS YOU BUY AUTO FIRE. FROM ME.',
-  'ARMOURED SHELLS PROTECT BOSS CORES. BREAK THE PLATES FIRST.',
-  'NEVER LICK A SPORE POD.',
+  'ARMOURED SHELLS PROTECT BOSS CORES. BREAK THE PLATES FIRST. THEN BREAK ITS HEART.',
+  'NEVER LICK A SPORE POD. GORBO SPEAKS FROM A REGRET WITH LEGS.',
   'DIVE UNDER WALLS IF YOU GET SQUASHED AGAINST THE SCREEN EDGE.',
-  'ALWAYS EAT A GOOD BREAKFAST. GORBO HAS SEVEN.',
-  'SHOOT THE SILVER CAPSULES. THINGS FALL OUT. NICE THINGS.',
+  'ALWAYS EAT A GOOD BREAKFAST. GORBO HAS SEVEN. TWO OF THEM ARE LIQUID.',
+  'SHOOT THE SILVER CAPSULES. THINGS FALL OUT. NICE THINGS. SUSPICIOUS THINGS.',
   'IF YOU DIE YOU KEEP YOUR GUNS BUT LOSE ONE BLASTER POWER LEVEL. SO DON\'T.',
   'THE SECRET TO HAPPINESS IS A FULL SHIELD AND AN EMPTY BLADDER.',
-  'GORBO\'S COUSIN SELLS THE SAME STUFF FOR LESS. GORBO\'S COUSIN IS A LIAR.',
-  'SIDE SHOT IS WORTH ITS WEIGHT IN TUNNELS.',
+  'GORBO\'S COUSIN SELLS THE SAME STUFF FOR LESS. GORBO\'S COUSIN IS A LIAR AND A FLIRT.',
+  'SIDE SHOT IS WORTH ITS WEIGHT IN TUNNELS. AND IN BAD ROOMS.',
+  'FLY CLOSE TO BULLETS WITHOUT TOUCHING THEM. THAT FILLS THE SAUCE METER. GORBO CALLS IT FOREPLAY.',
+  'FILL THE SAUCE METER AND YOUR SHOTS RUN HOT. SIT ON IT INSTEAD AND A KILLING BLOW MIGHT TUCK YOU IN.',
+  'A HIT COOLS THE SAUCE. PANIC IS NOT SPICY. PANIC IS JUST PANIC.',
+  'GRAZE A BOSS PATTERN AND THE METER FILLS FASTER THAN GORBO\'S TAB.',
+  'THE WHITE NOTCH ON THE SAUCE BAR IS WHERE DEATH STARTS TO HESITATE.',
 ];
-const pick = (a: string[]) => a[Math.floor(Math.random() * a.length)];
 
 let gorboBody: Spr | null = null;
 let icons: Map<string, Spr> | null = null;
@@ -114,7 +171,7 @@ export class Shop {
     else ps.load[it.id]++;
     if (it.id === 'armour') ps.shield += 25;
     audio.play('buy');
-    this.say(pick(BUY));
+    this.say(pick(BUY_FOR[it.id] ?? BUY));
   }
   sell() {
     const it = this.item();
@@ -182,9 +239,9 @@ export class Shop {
     // backdrop
     const g = ctx.createLinearGradient(0, 0, 0, 256);
     g.addColorStop(0, '#1a0c2a'); g.addColorStop(0.4, '#2a1438'); g.addColorStop(1, '#0a0614');
-    ctx.fillStyle = g; ctx.fillRect(0, 0, 320, 256);
+    fillView(ctx, g);
     ctx.fillStyle = '#3a2048';
-    for (let x = 0; x < 320; x += 16) ctx.fillRect(x, 0, 1, 96);
+    for (let x = -Math.ceil(VIEW.ox / 16) * 16; x < 320 + VIEW.ox; x += 16) ctx.fillRect(x, 0, 1, 96);
     // hanging lamp: shade, warm light cone (additive, dithered), drifting dust motes
     const sway = Math.sin(this.t * 0.02) * 2;
     ctx.fillStyle = '#111'; ctx.fillRect(Math.round(64 + sway * 0.3), 0, 1, 6);
@@ -203,7 +260,7 @@ export class Shop {
     ctx.fillStyle = '#aab'; ctx.fillRect(Math.round(57 + sway), 4, 14, 1);
     // wood-grain counter
     ctx.drawImage(counter(), 0, 82);
-    ctx.fillStyle = '#331a08'; ctx.fillRect(0, 95, 320, 1);
+    fillView(ctx, '#331a08', 95, 1);
     // speech bubble
     ctx.fillStyle = '#eeeedd'; ctx.fillRect(136, 6, 178, 66);
     ctx.fillStyle = '#eeeedd'; ctx.beginPath(); ctx.moveTo(136, 30); ctx.lineTo(118, 38); ctx.lineTo(136, 42); ctx.fill();

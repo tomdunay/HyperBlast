@@ -63,12 +63,17 @@ Every gameplay key can be remapped in Options → Controls. Touch devices get a 
 screen) plus FIRE / ZAP / DIVE / pause buttons. The shop also works with the mouse or touch: tap an item to select it,
 tap it again to buy.
 
-By default the game scales as large as the window allows without distorting its proportions. Press **F** to toggle
-browser fullscreen. Options → SCREEN switches between three modes:
+The game fills the window and never stretches the image. The playfield is always 320×256. On a wider screen the view
+grows sideways, up to 2.5:1 (enough for 21:9 monitors), and shows extra scenery on both sides: the level's walls
+continue into cave walls, parallax props, lights and atmosphere. Press **F** to toggle browser fullscreen. Options →
+SCREEN switches between three modes:
 
-- **Fill** (default): as large as possible while keeping the original 5:4 proportions.
-- **Stretch**: edge to edge, ignoring proportions.
-- **Pixel perfect**: whole-number scaling only, for the sharpest pixels.
+- **Wide fill** (default): fills the window edge to edge, widening the view to suit the screen.
+- **Classic 5:4**: the original frame, as large as it fits.
+- **Pixel perfect**: like wide fill, but only at whole-number scales.
+
+Options → BLOOM GLOW toggles the WebGL post pass, and CRT FILTER adds scanlines, an aperture mask and slight
+curvature on top of it.
 
 In the shop, Fire or Enter buys, X or Backspace sells, and Esc leaves.
 
@@ -88,8 +93,20 @@ In the shop, Fire or Enter buys, X or Backspace sells, and Esc leaves.
 ### Death rule
 
 You keep everything you bought. On death you lose **one Blaster power level** (never below 1) and any active Super
-Power, and you respawn with a full shield and about 3 seconds of invincibility (the shield bubble). Score passes 50,000
-and every 75,000 after that also award an extra life.
+Power, and you respawn with a full shield and about 3 seconds of invincibility (the shield bubble). The Sauce meter
+resets too. Score passes 50,000 and every 75,000 after that also award an extra life.
+
+### The Sauce
+
+Flying close to a bullet without touching it (a graze) fills the **Sauce** meter, and so do kill chains and broken
+boss parts. A hit cools it off. The white notch is the danger line.
+
+- **Banked** (past the notch, under a full bar): the next hit that would kill you is spent as a **Sauce Save**. You
+  keep about 40% shield and a short invincibility bubble, and the meter empties.
+- **Full**: the meter boils over into a few seconds of **HOT** shots, at 1.4× damage, with a pink rim on the screen.
+  A full meter spends the bank, so a hot streak and a clutched save are a choice you make by how long you sit on it.
+
+Gorbo commentates grazes, streaks, bosses, deaths, and the shop. He is not a reliable person.
 
 ### 2-player mode
 
@@ -321,14 +338,29 @@ reflection and a banking ship. The shop is lit by a swinging lamp with dust mote
 A dark dithered vignette frames the play area at all times. Each boss arrives with a cinematic intro: letterbox bars,
 scrolling hazard stripes, a flashing WARNING, and the guardian's name typing out.
 
-All of these layers are pre-rendered and cached per level. Rendering a frame costs about 2.5 ms in Chrome.
+The walls are shaded from a height map. A chamfer distance transform gives every wall a rounded bevel (machined on
+metal themes), with noise lumps and the theme texture embossed into it. That map is lit by a light from the upper
+left, plus specular highlights and ambient occlusion in deep interiors.
+
+The finished low-res frame goes to a WebGL presenter (`engine/post.ts`), which:
+
+- scales it to the window with sharp-bilinear filtering, so pixels stay crisp at any scale without shimmer;
+- adds a two-level bloom that makes bullets, lights and explosions glow;
+- bends the image around big explosions with shockwave refraction rings;
+- adds chromatic aberration that spikes on damage;
+- grades the colour and adds a vignette.
+
+Without WebGL, the game falls back to a plain nearest-neighbour blit.
+
+All of these layers are pre-rendered and cached per level. Rendering a frame costs about 1 ms in Chrome.
 
 ## Architecture
 
 ```text
 src/
-  main.ts              boot, integer scaling, 50 Hz loop
-  engine/              gfx (sprite builder, ramps, noise), font, input, audio + sequencer, pool
+  main.ts              boot, view sizing, 50 Hz loop
+  engine/              gfx (sprite builder, ramps, noise), view (wide view geometry), post (WebGL presenter),
+                       light, font, input, audio + sequencer, pool
   art/sprites.ts       ship, attachments, bullets, pickups, explosions, shape renderer
   audio/music.ts       sequenced track data
   game/

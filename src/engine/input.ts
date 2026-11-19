@@ -1,4 +1,5 @@
 // Keyboard, gamepad, touch and pointer input mapped to abstract actions.
+import { VIEW } from './view';
 export type Action = 'up' | 'down' | 'left' | 'right' | 'fire' | 'zap' | 'dive' | 'pause' | 'confirm' | 'back';
 export const ACTIONS: Action[] = ['up', 'down', 'left', 'right', 'fire', 'zap', 'dive', 'pause', 'confirm', 'back'];
 export const REMAPPABLE: Action[] = ['up', 'down', 'left', 'right', 'fire', 'zap', 'dive', 'pause'];
@@ -39,7 +40,7 @@ class Input {
     window.addEventListener('blur', () => this.keys.clear());
     canvas.addEventListener('pointerdown', (e) => {
       const r = canvas.getBoundingClientRect();
-      this.pendingClicks.push({ x: ((e.clientX - r.left) / r.width) * 320, y: ((e.clientY - r.top) / r.height) * 256 });
+      this.pendingClicks.push({ x: ((e.clientX - r.left) / r.width) * VIEW.w - VIEW.ox, y: ((e.clientY - r.top) / r.height) * 256 });
       gesture();
     });
     window.addEventListener('touchstart', (e) => { document.body.classList.add('touch'); this.onTouch(e); gesture(); }, { passive: false });

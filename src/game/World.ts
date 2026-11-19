@@ -4,7 +4,7 @@ import { Ctx, rnd, makeCanvas } from '../engine/gfx';
 import { drawGlow, shadowOf, vignette, hazardStripes, glow, darkVignette, lightShafts, searchCone } from '../engine/light';
 import { input } from '../engine/input';
 import { audio } from '../engine/audio';
-import { text } from '../engine/font';
+import { text, wrap } from '../engine/font';
 import { S, SF, Spr, flashOf, TokenType } from '../art/sprites';
 import { Scroller } from './Scroller';
 import { FX } from './particles';
@@ -14,33 +14,47 @@ import { ENEMIES, Enemy, PATTERNS, makeTrail, randomCapsuleToken } from './enemi
 import { Boss } from './bosses';
 import { PBullet, updateWeapons, moveBullet } from './weapons';
 import { LevelDef, SpawnDef, W, H } from './types';
+import { VIEW, MARGIN, fillView } from '../engine/view';
+import { postFx } from '../engine/post';
+import {
+  SAUCE_HEAT, SAUCE_MAX, SAUCE_SAVE_AT, bankTip, bossIntro, checkpointLine, comboBreakLine, comboLine, comboWord,
+  deathBig, deathLine, defusedLine, diveLine, extraLifeLine, fillTip, grazeLine, grazePop, idleLine, lowShieldLine,
+  midDeadLine, partLine, phaseLine, reverseLine, sauceOffLine, sauceOnLine, sauceSaveLine, superLine, zapLine,
+} from './sauce';
 
 export interface Host {
   demo: boolean; debug: boolean; diff: 0 | 1 | 2; twoPlayer: boolean;
   onDied(): void; onShop(): void; onLevelDone(): void; hiScore(): number;
   regen?(): void; seedLabel?(): string;
 }
-interface EBullet { alive: boolean; x: number; y: number; ox: number; oy: number; vx: number; vy: number; spr: Spr; dmg: number; r: number }
+interface EBullet { alive: boolean; x: number; y: number; ox: number; oy: number; vx: number; vy: number; spr: Spr; dmg: number; r: number; graze: number } // graze: 0 = none, 1 = inside graze zone, 2 = done
 interface Pickup { alive: boolean; kind: 'cash' | 'token'; val: number; tok: TokenType; x: number; y: number; ox: number; oy: number; vx: number; vy: number; t: number; life: number }
 
 const BULLET_DMG: Record<string, number> = { eOrb: 9, eBig: 16, eNeedle: 8, eSpore: 8, ePlasma: 11 };
 const TOKEN_GLOW: Record<string, string> = { P: '#ff4433', S: '#33ccff', H: '#44ff44', $: '#ffcc22', Z: '#cc55ff', D: '#3366ff', X: '#ffffff', '1': '#ff9922' };
 
-let hudPanel: HTMLCanvasElement | null = null;
-/** Bevelled, riveted metal HUD strip. */
+const hudPanels = new Map<number, HTMLCanvasElement>();
+/** Bevelled, riveted metal HUD strip spanning the whole view (draw at x = -VIEW.ox). */
 function panel(): HTMLCanvasElement {
-  if (hudPanel) return hudPanel;
-  const [c, x] = makeCanvas(W, 14);
+  const VW = VIEW.w, ox = VIEW.ox;
+  const hit = hudPanels.get(VW);
+  if (hit) return hit;
+  const [c, x] = makeCanvas(VW, 14);
   const g = x.createLinearGradient(0, 0, 0, 14);
   g.addColorStop(0, '#8a94b4'); g.addColorStop(0.15, '#5a6488'); g.addColorStop(0.6, '#2c3250'); g.addColorStop(1, '#12162a');
-  x.fillStyle = g; x.fillRect(0, 0, W, 14);
-  x.fillStyle = '#c8d0ee'; x.fillRect(0, 0, W, 1);
-  x.fillStyle = '#05060c'; x.fillRect(0, 13, W, 1);
-  for (let px = 4; px < W; px += 52) { x.fillStyle = '#0a0c18'; x.fillRect(px, 6, 2, 2); x.fillStyle = '#c8d0ee'; x.fillRect(px, 6, 1, 1); }
-  for (const sx of [86, 150, 222, 286]) { x.fillStyle = '#0a0c18'; x.fillRect(sx, 2, 1, 10); x.fillStyle = '#8890b0'; x.fillRect(sx + 1, 2, 1, 10); }
+  x.fillStyle = g; x.fillRect(0, 0, VW, 14);
+  x.fillStyle = '#c8d0ee'; x.fillRect(0, 0, VW, 1);
+  x.fillStyle = '#05060c'; x.fillRect(0, 13, VW, 1);
+  // out in the margins: ventilation grilles between end caps
+  if (ox >= 24) for (const [a, b] of [[4, ox - 6], [ox + W + 6, VW - 4]]) {
+    for (let gx = a + 4; gx < b - 4; gx += 3) { x.fillStyle = '#0a0c18'; x.fillRect(gx, 4, 1, 6); x.fillStyle = '#6a7298'; x.fillRect(gx + 1, 4, 1, 6); }
+    for (const rx of [a, b - 2]) { x.fillStyle = '#0a0c18'; x.fillRect(rx, 6, 2, 2); x.fillStyle = '#c8d0ee'; x.fillRect(rx, 6, 1, 1); }
+  }
+  for (let px = 4; px < W; px += 52) { x.fillStyle = '#0a0c18'; x.fillRect(ox + px, 6, 2, 2); x.fillStyle = '#c8d0ee'; x.fillRect(ox + px, 6, 1, 1); }
+  for (const sx of [86, 150, 222, 286, ...(ox >= 8 ? [-3, W + 2] : [])]) { x.fillStyle = '#0a0c18'; x.fillRect(ox + sx, 2, 1, 10); x.fillStyle = '#8890b0'; x.fillRect(ox + sx + 1, 2, 1, 10); }
   // recessed wells for the readouts
-  for (const [wx, ww] of [[9, 75], [154, 66]]) { x.fillStyle = '#05060c'; x.fillRect(wx, 3, ww, 9); x.fillStyle = '#6a7298'; x.fillRect(wx, 12, ww, 1); }
-  hudPanel = c;
+  for (const [wx, ww] of [[9, 75], [154, 66]]) { x.fillStyle = '#05060c'; x.fillRect(ox + wx, 3, ww, 9); x.fillStyle = '#6a7298'; x.fillRect(ox + wx, 12, ww, 1); }
+  hudPanels.set(VW, c);
   return c;
 }
 
@@ -67,6 +81,25 @@ export class World {
   dispCash = -1;
   fireMul: number; bulletMul: number; dmgMul: number;
   showHit = false; invincible = false; showMap = false;
+  // combo system
+  combo = 0;
+  comboTimer = 0;
+  /** 0..100. Grazes and chains fill it. A full meter runs hot. A banked meter can refuse a killing blow. */
+  sauce = 0;
+  sauceBurst = 0;
+  sauceFlash = 0;
+  shieldWarned = false;
+  chatter = '';
+  chatterT = 0;
+  chatterCd = 0;
+  bossQuip = '';
+  defusedQuip = '';
+  reverseHeckled = false;
+  sauceSeen = false;
+  // hit stop (freeze frames on boss kill)
+  hitStop = 0;
+  // stats tracking (lives on PlayerState so deaths don't reset it)
+  get stats() { return this.ps.lvStats; }
   private mapCanvas: HTMLCanvasElement | null = null;
   ambient: { x: number; y: number; s: number; z: number }[] = [];
   shopPending = 0;
@@ -92,8 +125,9 @@ export class World {
         else this.spawnState[i] = 2;
       }
     });
-    for (let i = 0; i < 40; i++) this.ambient.push({ x: rnd(0, W), y: rnd(0, H), s: rnd(0.2, 0.6), z: Math.random() < 0.3 ? 2 : 1 });
+    for (let i = 0; i < 70; i++) this.ambient.push({ x: rnd(-MARGIN, W + MARGIN), y: rnd(0, H), s: rnd(0.2, 0.6), z: Math.random() < 0.3 ? 2 : 1 });
     this.say(host.demo ? 'DEMO' : 'GET READY', 120, 'gold');
+    audio.setBassIntensity(0);
     audio.playMusic(lv.music);
   }
 
@@ -105,10 +139,72 @@ export class World {
 
   say(s: string, t = 100, style: 'gold' | 'red' | 'cyan' = 'gold') { this.msg = s; this.msgT = t; this.msgStyle = style; }
 
+  /** Gorbo, on the radio. Stays out of the big centre banner. */
+  radio(s: string, force = false) {
+    if (this.host.demo) return;
+    if (!force && (this.chatterCd > 0 || this.bossIntroT > 40)) return;
+    this.chatter = s;
+    this.chatterT = Math.min(170, 70 + s.length);
+    this.chatterCd = force ? 40 : 100;
+  }
+  heatDmg(n: number) { return this.sauceBurst > 0 ? n * SAUCE_HEAT : n; }
+  addSauce(n: number) {
+    if (this.host.demo || this.player.dead || this.state !== 'play' || this.sauceBurst > 0) return;
+    if (this.boss?.state === 'dying') return;
+    const prev = this.sauce;
+    this.sauce = Math.min(SAUCE_MAX, this.sauce + n);
+    if (prev < 40 && this.sauce >= 40) { const tip = fillTip(); if (tip) this.radio(tip, true); }
+    if (prev < SAUCE_SAVE_AT && this.sauce >= SAUCE_SAVE_AT) { const tip = bankTip(); if (tip) this.radio(tip, true); }
+    if (this.sauce >= SAUCE_MAX) this.startSauce();
+  }
+  startSauce() {
+    this.sauce = SAUCE_MAX;
+    this.sauceBurst = 250;
+    const room = this.ps.maxShield() - this.ps.shield;
+    if (room > 0) this.ps.shield += Math.min(16, room);
+    this.sauceFlash = 10;
+    this.fx.floatText(this.player.x, this.player.y - 28, 'SAUCE!', 'red');
+    this.say('TOO HOT', 50, 'red');
+    this.radio(sauceOnLine(), true);
+    audio.play('token');
+  }
+  /** A banked meter spends itself to eat one lethal hit. */
+  trySauceSave(): boolean {
+    if (this.host.demo || this.sauceBurst > 0 || this.sauce < SAUCE_SAVE_AT) return false;
+    this.sauce = 0;
+    this.ps.shield = Math.max(32, Math.round(this.ps.maxShield() * 0.4));
+    this.player.inv = Math.max(this.player.inv, 110);
+    this.player.hitFlash = 10;
+    this.sauceFlash = 18;
+    this.say('SAUCE SAVE', 80, 'red');
+    this.radio(sauceSaveLine(), true);
+    this.fx.floatText(this.player.x, this.player.y - 26, 'SAVED', 'purple');
+    this.fx.ring(this.player.x, this.player.y);
+    audio.play('oneup');
+    return true;
+  }
+  onBossBreak(core: boolean) {
+    this.addSauce(core ? 20 : 14);
+    if (!core) this.radio(partLine());
+  }
+  onPhase2() { this.radio(phaseLine(), true); }
+
   // ---------------------------------------------------------------- update
   update() {
     this.t++;
     this.stateT++;
+    // hit stop: freeze simulation for dramatic pause (t still ticks for visual effects)
+    if (this.hitStop > 0) { this.hitStop--; return; }
+    // combo decay
+    if (this.comboTimer > 0) this.comboTimer--;
+    if (this.comboTimer === 0 && this.combo > 0) {
+      if (this.combo >= 8) this.radio(comboBreakLine());
+      this.combo = 0;
+    }
+    if (this.sauceBurst > 0 && --this.sauceBurst === 0) { this.sauce = 0; this.radio(sauceOffLine()); }
+    if (this.sauceFlash > 0) this.sauceFlash--;
+    if (this.chatterT > 0) this.chatterT--;
+    if (this.chatterCd > 0) this.chatterCd--;
     if (this.host.debug) this.debugKeys();
     this.readControls();
     const p = this.player;
@@ -137,7 +233,7 @@ export class World {
       p.update(this, this.ctl);
       updateWeapons(this, p, this.ctl);
       if (this.ctl.zap && this.ps.load.zapper > 0 && !p.dead) this.zap();
-      if (this.ctl.dive && this.ps.load.dive > 0 && p.dive === 0 && !p.dead) { this.ps.load.dive--; p.dive = 200; audio.play('dive'); }
+      if (this.ctl.dive && this.ps.load.dive > 0 && p.dive === 0 && !p.dead) { this.ps.load.dive--; p.dive = 200; audio.play('dive'); this.radio(diveLine()); }
       if (this.ps.load.regen && this.t % (60 / this.ps.load.regen | 0) === 0) this.ps.shield = Math.min(this.ps.maxShield(), this.ps.shield + 1);
     }
     // ---- entities ----
@@ -150,7 +246,10 @@ export class World {
     this.collidePlayer();
     // ---- triggers ----
     const cps = this.lv.checkpoints;
-    for (let k = this.ps.checkpoint + 1; k < cps.length; k++) if (sc.maxY >= cps[k]) { this.ps.checkpoint = k; if (k > 0 && !this.host.demo) this.say('CHECKPOINT', 60, 'cyan'); }
+    for (let k = this.ps.checkpoint + 1; k < cps.length; k++) if (sc.maxY >= cps[k]) {
+      this.ps.checkpoint = k;
+      if (k > 0 && !this.host.demo) { this.say('CHECKPOINT', 60, 'cyan'); this.radio(checkpointLine(), true); }
+    }
     if (!this.boss && sc.y >= this.lockY - 0.01 && this.state === 'play') this.startBoss();
     if (this.lv.idx === 0 && !this.ps.midDone && !this.lv.midBoss && sc.oy < this.lv.shopAt && sc.y >= this.lv.shopAt) this.shopPending = 40;
     if (this.shopPending > 0 && --this.shopPending === 0) { this.ps.midDone = true; this.updateLock(); this.goShop(); }
@@ -166,11 +265,21 @@ export class World {
       this.fx.exhaust(p.x + side + p.bank * 1.2, p.y + 18, p.lv('speed') > 0 || this.t % 3 === 0);
     }
     if (this.hurtT > 0) this.hurtT--;
+    // dynamic music: boss fights get aggressive bass, low shield adds intensity
+    if (this.boss && this.boss.state !== 'dead') {
+      const shieldFrac = this.ps.shield / this.ps.maxShield();
+      audio.setBassIntensity(shieldFrac < 0.25 ? 2 : 1);
+    }
     if (this.dispCash < 0) this.dispCash = this.ps.cash;
     this.dispCash += Math.sign(this.ps.cash - this.dispCash) * Math.max(1, Math.ceil(Math.abs(this.ps.cash - this.dispCash) * 0.15));
     if (Math.abs(this.ps.cash - this.dispCash) < 1) this.dispCash = this.ps.cash;
     // score-based extra lives
-    if (this.ps.score >= this.ps.extraLifeAt) { this.ps.extraLifeAt += 75000; this.ps.lives++; audio.play('oneup'); this.say('EXTRA LIFE', 80, 'cyan'); }
+    if (this.ps.score >= this.ps.extraLifeAt) { this.ps.extraLifeAt += 75000; this.ps.lives++; audio.play('oneup'); this.say('EXTRA LIFE', 80, 'cyan'); this.radio(extraLifeLine(), true); }
+    if (!this.host.demo && this.state === 'play' && !p.dead && this.t === 160) this.radio('TRY TO COME BACK IN ONE PIECE. GORBO HATES THE PAPERWORK.');
+    if (!this.host.demo && this.state === 'play' && !p.dead && this.t % 800 === 500 && this.combo === 0 && this.enemies.list.some((e) => e.alive && e.def.name !== 'capsule' && e.def.name !== 'gate')) this.radio(idleLine());
+    if (this.scrollV < -0.5) { if (!this.reverseHeckled) { this.reverseHeckled = true; this.radio(reverseLine()); } }
+    else if (this.scrollV > 0.2) this.reverseHeckled = false;
+    if (this.ps.shield / this.ps.maxShield() > 0.55) this.shieldWarned = false;
     this.pb.sweep(); this.eb.sweep(); this.enemies.sweep(); this.pickups.sweep();
   }
 
@@ -285,7 +394,7 @@ export class World {
     if (this.eb.list.length > 260) return;
     const b = this.eb.get();
     b.x = b.ox = x; b.y = b.oy = y; b.vx = vx; b.vy = vy; b.spr = S[kind] ?? S.eOrb;
-    b.dmg = BULLET_DMG[kind] ?? 9; b.r = Math.max(2, b.spr.width / 2 - 1);
+    b.dmg = BULLET_DMG[kind] ?? 9; b.r = Math.max(2, b.spr.width / 2 - 1); b.graze = 0;
   }
   private enemyFire(e: Enemy) {
     const f = e.def.fire!;
@@ -323,7 +432,7 @@ export class World {
         if (b.kind === 'mine') { this.mineBlast(b); break; }
         if (b.pierce > 0 && b.hits.includes(e)) continue;
         if (b.kind !== 'flame' && b.kind !== 'laser') this.fx.spark(b.x, b.y, e.world, e.def.armored ? 'metal' : 'flesh');
-        const killed = this.damageEnemy(e, b.dmg);
+        const killed = this.damageEnemy(e, this.heatDmg(b.dmg));
         if (b.pierce > 0) {
           b.hits.push(e);
           if (b.kind === 'cannon' && !killed) { b.alive = false; break; }
@@ -341,7 +450,7 @@ export class World {
       if (hit === 'body') { b.alive = false; this.fx.spark(b.x, b.y); continue; }
       if (b.pierce > 0 && b.hits.includes(hit)) continue;
       this.fx.spark(b.x, b.y, false, this.boss.vulnerable(hit) ? 'flesh' : 'metal');
-      this.boss.damage(this, hit, b.dmg);
+      this.boss.damage(this, hit, this.heatDmg(b.dmg));
       if (b.pierce > 0 && b.kind !== 'cannon') { b.hits.push(hit); continue; }
       b.alive = false;
     }
@@ -351,8 +460,8 @@ export class World {
     b.alive = false;
     this.fx.explode(b.x, b.y, 1);
     audio.play('expM', 0.7);
-    for (const e of this.enemies.list) if (Math.hypot(e.x - b.x, e.y - b.y) < 32) this.damageEnemy(e, b.dmg);
-    if (this.boss) for (const p of this.boss.parts) if (!p.dead && Math.hypot(this.boss.px(p) - b.x, this.boss.py(p) - b.y) < 36) this.boss.damage(this, p, b.dmg * 0.6);
+    for (const e of this.enemies.list) if (Math.hypot(e.x - b.x, e.y - b.y) < 32) this.damageEnemy(e, this.heatDmg(b.dmg));
+    if (this.boss) for (const p of this.boss.parts) if (!p.dead && Math.hypot(this.boss.px(p) - b.x, this.boss.py(p) - b.y) < 36) this.boss.damage(this, p, this.heatDmg(b.dmg * 0.6));
   }
 
   overlapEnemy(e: Enemy, x: number, y: number, hw: number, hh: number) {
@@ -421,6 +530,18 @@ export class World {
     this.fx.explode(e.x, e.y, d.expl, e.world);
     audio.play(d.expl === 2 ? 'expL' : d.expl === 1 ? 'expM' : 'expS', d.expl ? 0.8 : 0.6);
     if (d.segs) for (let i = 1; i <= d.segs; i++) { const s = e.trail[i * 7]; this.fx.explode(s.x, s.y, 0, false, i * 3); }
+    // combo system: kills within 60 ticks chain together
+    this.comboTimer = 60;
+    this.combo++;
+    this.stats.kills++;
+    if (this.combo > this.stats.maxCombo) this.stats.maxCombo = this.combo;
+    const milestones = [5, 8, 12, 16, 20, 25, 30, 40];
+    if (milestones.includes(this.combo)) {
+      this.fx.floatText(e.x, e.y - 16, comboWord(this.combo), this.combo >= 12 ? 'purple' : 'gold');
+      this.radio(comboLine(this.combo));
+      this.addSauce(6 + Math.floor(this.combo / 4));
+    }
+    this.addSauce(1);
     this.addScore(d.score);
     if (!d.noCash) this.dropCash(e.x, e.y, d.cash, d.expl === 2 ? 6 : 4);
     if (e.token) this.dropToken(e.x, e.y, e.token as TokenType);
@@ -434,6 +555,7 @@ export class World {
   }
 
   updateEnemyBullets() {
+    const p = this.player;
     for (const b of this.eb.list) {
       b.ox = b.x; b.oy = b.y;
       b.x += b.vx; b.y += b.vy;
@@ -441,6 +563,24 @@ export class World {
       if (this.sc.solid(b.x, b.y)) { b.alive = false; continue; }
       for (const s of this.player.sats) {
         if (Math.abs(s.x - b.x) < 7 && Math.abs(s.y - b.y) < 7) { b.alive = false; this.fx.spark(b.x, b.y); break; }
+      }
+      // grazing: bullet passed close but didn't hit — reward aggressive dodging.
+      // Awarded when the bullet leaves the graze zone still alive, so bullets that go on to hit don't count.
+      if (b.alive && b.graze < 2 && !this.host.demo) {
+        const dx = Math.abs(p.x - b.x), dy = Math.abs(p.y - b.y);
+        const near = dx < b.r + 12 && dy < b.r + 14;
+        if (near && b.graze === 0) b.graze = 1;
+        else if (!near && b.graze === 1) {
+          b.graze = 2;
+          if (!p.dead && p.dive === 0 && p.inv <= 0 && this.state === 'play') {
+            this.addScore(50);
+            this.stats.grazes++;
+            this.earn(5);
+            this.addSauce(5);
+            if (this.stats.grazes % 4 === 0) this.fx.floatText(p.x, p.y - 24, grazePop(this.stats.grazes), 'purple');
+            if (this.stats.grazes % 8 === 0) this.radio(grazeLine());
+          }
+        }
       }
     }
   }
@@ -469,6 +609,7 @@ export class World {
   }
   dropCash(x: number, y: number, amount: number, maxN = 4) {
     amount = Math.round((amount * (1 + 0.06 * this.lv.idx)) / 5) * 5; // later shops stay meaningful
+    if (this.combo >= 5) amount = Math.round(amount * (this.combo >= 10 ? 1.5 : 1.25) / 5) * 5; // combo cash bonus
     const sizes = [100, 50, 25, 10, 5];
     let n = 0;
     while (amount >= 5 && n < maxN) {
@@ -483,10 +624,12 @@ export class World {
     const k = this.pickups.get();
     k.kind = 'token'; k.tok = tok; k.val = 0; k.x = k.ox = x; k.y = k.oy = y; k.vx = rnd(-0.6, 0.6) || 0.4; k.vy = 0; k.t = 0; k.life = 750;
   }
+  /** add cash to the player and count it towards the level stats */
+  earn(n: number) { this.ps.cash += n; if (!this.host.demo) this.stats.cashEarned += n; }
   collect(k: Pickup) {
     const ps = this.ps, p = this.player;
     if (k.kind === 'cash') {
-      ps.cash += k.val;
+      this.earn(k.val);
       audio.play('cash');
       this.fx.floatText(k.x, k.y - 8, '$' + k.val, 'green');
       return;
@@ -494,18 +637,22 @@ export class World {
     audio.play('token');
     const lbl = (s: string) => this.fx.floatText(p.x, p.y - 22, s, 'gold');
     switch (k.tok) {
-      case 'P': if (ps.load.power < 5) { ps.load.power++; lbl('POWER UP'); } else { ps.cash += 300; lbl('$300'); } break;
+      case 'P': if (ps.load.power < 5) { ps.load.power++; lbl('POWER UP'); } else { this.earn(300); lbl('$300'); } break;
       case 'S': if (ps.load.speed < 3) { ps.load.speed++; lbl('SPEED UP'); } else { this.addScore(2000); lbl('2000'); } break;
       case 'H': ps.shield = Math.min(ps.maxShield(), ps.shield + 40); lbl('SHIELD'); break;
-      case '$': ps.cash += 250; lbl('$250'); break;
+      case '$': this.earn(250); lbl('$250'); break;
       case 'Z': ps.load.zapper = Math.min(5, ps.load.zapper + 1); lbl('ZAPPER'); break;
       case 'D': ps.load.dive = Math.min(5, ps.load.dive + 1); lbl('DIVE'); break;
-      case 'X': p.superT = 500; lbl('SUPER POWER!'); this.say('SUPER POWER', 70, 'cyan'); break;
+      case 'X': p.superT = 500; lbl('SUPER POWER!'); this.say('SUPER POWER', 70, 'cyan'); this.radio(superLine(), true); break;
       case '1': ps.lives++; lbl('1 UP'); audio.play('oneup'); break;
     }
   }
 
-  addScore(n: number) { if (!this.host.demo) this.ps.score += n; }
+  addScore(n: number) {
+    if (this.host.demo) return;
+    const mul = this.combo >= 10 ? 3 : this.combo >= 5 ? 2 : this.combo >= 3 ? 1.5 : 1;
+    this.ps.score += Math.round(n * mul);
+  }
 
   nearestEnemy(x: number, y: number): Enemy | null {
     let best: Enemy | null = null, bd = 1e9;
@@ -531,8 +678,11 @@ export class World {
   hurtPlayer(amount: number) {
     if (!this.playerVulnerable()) return;
     const ps = this.ps;
-    if (ps.shield <= 0) { this.killPlayer(); return; }
-    ps.shield = Math.max(0, ps.shield - amount * this.dmgMul);
+    const hit = amount * this.dmgMul;
+    if (ps.shield - hit <= 0) { if (!this.trySauceSave()) this.killPlayer(); return; }
+    ps.shield -= hit;
+    if (this.sauceBurst <= 0) this.sauce = Math.max(0, this.sauce - 16);
+    if (!this.shieldWarned && ps.shield / ps.maxShield() < 0.28) { this.shieldWarned = true; this.radio(lowShieldLine(), true); }
     if (amount >= 3) this.hurtT = 16;
     if (amount >= 3 || this.player.hitFlash === 0) { this.player.hitFlash = 8; if (amount >= 3) audio.play('hurt'); }
   }
@@ -542,16 +692,25 @@ export class World {
     this.player.hitFlash = 4;
     this.hurtT = Math.max(this.hurtT, 8);
     if (this.t % 10 === 0) audio.play('hurt', 0.5);
-    if (this.ps.shield <= 0) { this.ps.shield = 0; this.killPlayer(); }
+    if (this.ps.shield <= 0) { if (!this.trySauceSave()) { this.ps.shield = 0; this.killPlayer(); } }
   }
   killPlayer() {
     const p = this.player;
     if (p.dead) return;
     p.dead = true;
     this.state = 'dying'; this.stateT = 0;
+    this.sauceBurst = 0;
+    this.say(deathBig(), 120, 'red');
+    this.radio(deathLine(), true);
     this.fx.explode(p.x, p.y, 2);
     for (let i = 0; i < 5; i++) this.fx.explode(p.x + rnd(-14, 14), p.y + rnd(-14, 14), 1, false, 6 + i * 6);
     audio.play('die');
+    // death chain reaction: nearby enemy bullets explode, clearing some space
+    for (const b of this.eb.list) {
+      if (!b.alive) continue;
+      const d = Math.hypot(b.x - p.x, b.y - p.y);
+      if (d < 80) { b.alive = false; this.fx.explode(b.x, b.y, 0, false, Math.round(d / 8)); }
+    }
   }
 
   collidePlayer() {
@@ -571,7 +730,7 @@ export class World {
     // body contact with enemies; satellites hurt enemies
     for (const e of this.enemies.list) {
       if (!e.alive) continue;
-      for (const s of p.sats) if (s.kind === 'ball' && this.overlapEnemy(e, s.x, s.y, 6, 6) && this.t % 4 === 0) this.damageEnemy(e, 0.8);
+      for (const s of p.sats) if (s.kind === 'ball' && this.overlapEnemy(e, s.x, s.y, 6, 6) && this.t % 4 === 0) this.damageEnemy(e, this.heatDmg(0.8));
       if (!e.alive || e.def.name === 'capsule') continue;
       if (p.dive === 0 && this.overlapEnemy(e, p.x, p.y, 6, 7)) {
         if (p.contactCd <= 0) { this.hurtPlayer(e.def.touchDmg ?? 14); p.contactCd = 25; }
@@ -594,8 +753,9 @@ export class World {
     this.fx.shake = 10;
     audio.play('zap');
     for (const b of this.eb.list) { b.alive = false; this.fx.spark(b.x, b.y); }
-    for (const e of this.enemies.list) if (e.y > -10 && e.y < H + 10) this.damageEnemy(e, 25);
-    if (this.boss && this.boss.state === 'fight') for (const p of this.boss.parts) if (this.boss.vulnerable(p)) this.boss.damage(this, p, 14);
+    for (const e of this.enemies.list) if (e.y > -10 && e.y < H + 10) this.damageEnemy(e, this.heatDmg(25));
+    if (this.boss && this.boss.state === 'fight') for (const p of this.boss.parts) if (this.boss.vulnerable(p)) this.boss.damage(this, p, this.heatDmg(14));
+    this.radio(zapLine(), true);
   }
 
   // ---------------------------------------------------------------- bosses
@@ -606,6 +766,7 @@ export class World {
     this.boss = new Boss(key, [0.7, 1, 1.35][this.host.diff]);
     this.bossKind = mid ? 'mid' : 'end';
     this.bossIntroT = 180;
+    this.bossQuip = bossIntro(this.boss.def.name);
     audio.play('alarm');
     audio.playMusic('boss');
   }
@@ -614,13 +775,19 @@ export class World {
     b.update(this);
     if (b.state === 'dead') {
       if (this.bossKind === 'mid') {
+        this.hitStop = 5; // dramatic freeze on boss kill
+        audio.setBassIntensity(0);
         this.ps.midDone = true;
         this.boss = null;
         this.updateLock();
         this.say('MID GUARDIAN DESTROYED', 100, 'cyan');
+        this.radio(midDeadLine(), true);
         this.shopPending = 110;
       } else if (this.state === 'play') {
+        this.hitStop = 5;
+        audio.setBassIntensity(0);
         this.state = 'defused'; this.stateT = 0;
+        this.defusedQuip = defusedLine();
         this.boss = null;
         audio.play('oneup');
         audio.playMusic('ending');
@@ -671,13 +838,22 @@ export class World {
     this.sc.drawFore(ctx, a);
     if (this.showHit) this.drawHitboxes(ctx);
     ctx.restore();
-    ctx.drawImage(darkVignette(), 0, 0);
+    this.setPostFx(a);
+    ctx.drawImage(darkVignette(), -VIEW.ox, 0);
     const wf = Math.max(this.zapFlash / 14, this.fx.flash);
-    if (wf > 0) { ctx.fillStyle = `rgba(255,255,255,${wf})`; ctx.fillRect(0, 0, W, H); }
+    if (wf > 0) fillView(ctx, `rgba(255,255,255,${wf})`);
     if (this.bossIntroT > 0) this.drawBossIntro(ctx);
-    if (this.hurtT > 0) { ctx.globalAlpha = Math.min(1, this.hurtT / 12); ctx.drawImage(vignette(), 0, 0); ctx.globalAlpha = 1; }
+    if (this.hurtT > 0) { ctx.globalAlpha = Math.min(1, this.hurtT / 12); ctx.drawImage(vignette(), -VIEW.ox, 0); ctx.globalAlpha = 1; }
+    if (this.sauceFlash > 0) fillView(ctx, `rgba(255,30,80,${Math.min(0.45, this.sauceFlash / 30)})`);
+    if (this.sauceBurst > 0) {
+      ctx.save();
+      ctx.strokeStyle = this.t % 8 < 4 ? '#ff2266' : '#ffaa44';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(2 - VIEW.ox, 2, VIEW.w - 4, H - 18);
+      ctx.restore();
+    }
     if (this.player.crushing && this.t % 10 < 6) {
-      const st = hazardStripes(), o = -(this.t % 16);
+      const st = hazardStripes(), o = -(this.t % 16) - VIEW.ox;
       ctx.drawImage(st, o, 0);
       text(ctx, 'CRUSH WARNING', 160, 12, 'red', 1, 0.5);
     }
@@ -688,12 +864,21 @@ export class World {
    * Dynamic lighting: light sources (explosions, the ship's engines, heavy shots, enemy bullets, beams) are drawn
    * into an offscreen buffer, masked to the scenery pixels, and added on top — so walls light up around them.
    */
+  /** Feed the WebGL post pass: shockwave refraction rings, chromatic aberration on damage, bloom surges. */
+  setPostFx(a: number) {
+    postFx.waves = this.fx.waves(a).map((w) => ({ ...w, x: w.x + VIEW.ox }));
+    postFx.aberr = Math.max(this.hurtT > 0 ? this.hurtT * 0.35 : 0, this.fx.shake * 0.5, this.sauceBurst > 0 ? 1.2 : 0);
+    postFx.bloomBoost = 1 + Math.min(0.8, this.fx.flash * 1.5 + this.zapFlash / 20);
+  }
+
   private lightBuf: [HTMLCanvasElement, Ctx] | null = null;
   drawSceneLighting(ctx: Ctx, a: number) {
-    if (!this.lightBuf) this.lightBuf = makeCanvas(W, H);
+    if (!this.lightBuf || this.lightBuf[0].width !== VIEW.w) this.lightBuf = makeCanvas(VIEW.w, H);
     const [lc, lx] = this.lightBuf;
+    lx.setTransform(1, 0, 0, 1, 0, 0);
     lx.globalCompositeOperation = 'source-over';
-    lx.clearRect(0, 0, W, H);
+    lx.clearRect(0, 0, VIEW.w, H);
+    lx.translate(VIEW.ox, 0);
     const L = (x: number, y: number, r: number, c: string, s = 1) => {
       const g = glow(Math.round(r / 4) * 4, c, s);
       lx.drawImage(g, Math.round(x - g.width / 2), Math.round(y - g.height / 2));
@@ -719,7 +904,7 @@ export class World {
     // keep only the light that falls on scenery
     lx.globalCompositeOperation = 'destination-in';
     this.sc.drawFg(lx, a);
-    ctx.drawImage(lc, 0, 0);
+    ctx.drawImage(lc, -VIEW.ox, 0);
   }
 
   /** Per-theme atmosphere: light shafts from above, rising heat, or sweeping searchlights (additive). */
@@ -730,7 +915,7 @@ export class World {
         const col = th.tex === 'coral' ? '#66ccff' : th.tex === 'vine' ? '#ccff66' : th.tex === 'crystal' ? '#88ffff' : '#ffeecc';
         const s = lightShafts(col, th.tex.length);
         ctx.globalAlpha = 0.55 + Math.sin(t * 0.013) * 0.25;
-        ctx.drawImage(s, Math.round(-40 + Math.sin(t * 0.004) * 30), 0);
+        ctx.drawImage(s, Math.round(-40 - MARGIN + Math.sin(t * 0.004) * 30), 0);
         ctx.globalAlpha = 1;
         break;
       }
@@ -738,7 +923,7 @@ export class World {
         // heat glow rising from below, pulsing
         const k = 0.5 + Math.sin(t * 0.05) * 0.2;
         ctx.globalAlpha = k;
-        for (let x = 20; x < W; x += 56) {
+        for (let x = 20 - Math.ceil(VIEW.ox / 56) * 56; x < W + VIEW.ox; x += 56) {
           const g = glow(48, '#ff4400', 1);
           ctx.drawImage(g, x - 48 + Math.round(Math.sin(t * 0.02 + x) * 8), H - 40);
         }
@@ -747,7 +932,9 @@ export class World {
       }
       case 'metal': case 'biomech': {
         const cone = searchCone();
-        for (const [ox, ph] of [[30, 0], [290, 2.4]] as const) {
+        const cones: [number, number][] = [[30, 0], [290, 2.4]];
+        if (VIEW.ox > 60) cones.push([-VIEW.ox + 40, 1.3], [W + VIEW.ox - 40, 3.7]);
+        for (const [ox, ph] of cones) {
           ctx.save();
           ctx.translate(ox, -6);
           ctx.rotate(Math.sin(t * 0.012 + ph) * 0.55);
@@ -768,9 +955,8 @@ export class World {
     const t = 180 - this.bossIntroT;
     const k = Math.min(1, t / 20, this.bossIntroT / 20);
     const bar = Math.round(20 * k);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, bar); ctx.fillRect(0, H - 14 - bar, W, bar);
-    const st = hazardStripes(), o = -((t * 2) % 16);
+    fillView(ctx, '#000', 0, bar); fillView(ctx, '#000', H - 14 - bar, bar);
+    const st = hazardStripes(), o = -((t * 2) % 16) - VIEW.ox;
     if (bar > 8) { ctx.drawImage(st, o, bar - 8); ctx.drawImage(st, o - 8, H - 14 - bar); }
     if (k >= 1) {
       if (t % 24 < 16) text(ctx, 'WARNING', 160, 92, 'red', 3, 0.5);
@@ -778,6 +964,7 @@ export class World {
       const shown = name.slice(0, Math.max(0, Math.floor((t - 30) / 3)));
       text(ctx, shown, 160, 126, 'chrome', name.length > 13 ? 1 : 2, 0.5);
       text(ctx, this.bossKind === 'mid' ? 'MID GUARDIAN APPROACHING' : 'BOMB GUARDIAN APPROACHING', 160, 148, 'gold', 1, 0.5);
+      if (t > 46 && this.bossQuip) wrap(this.bossQuip, 42).slice(0, 2).forEach((l, i) => text(ctx, l, 160, 162 + i * 9, 'purple', 1, 0.5));
     }
   }
 
@@ -819,7 +1006,7 @@ export class World {
         case 'flame': g(x, y, b.hw + 3, '#ff6611', 0.75); break;
         case 'mine': if (b.t % 20 < 8) g(x, y, 5, '#ff2222'); break;
         default: {
-          const c = b.spr === S.spread ? '#bb55ff' : b.spr === S.side || b.spr === S.rear ? '#44ff55' : b.spr === S.twist || b.spr === S.droneShot ? '#33ddff' : '#ffbb33';
+          const c = this.sauceBurst > 0 ? '#ff3377' : b.spr === S.spread ? '#bb55ff' : b.spr === S.side || b.spr === S.rear ? '#44ff55' : b.spr === S.twist || b.spr === S.droneShot ? '#33ddff' : '#ffbb33';
           g(x, y, 5, c, 0.8); g(x - b.vx, y - b.vy, 3, c, 0.6);
         }
       }
@@ -834,7 +1021,10 @@ export class World {
     if (!p.dead && p.dive === 0 && (p.inv <= 0 || p.inv % 4 >= 2 || p.inv >= 60)) {
       const x = p.ox + (p.x - p.ox) * a, y = p.oy + (p.y - p.oy) * a, bo = p.bank * 1.2;
       const er = 6 + p.lv('speed') + ((this.t >> 1) & 1);
-      g(x - 6 + bo, y + 17, er, '#ff7722'); g(x + 6 + bo, y + 17, er, '#ff7722');
+      const flame = this.sauceBurst > 0 ? '#ff2266' : '#ff7722';
+      g(x - 6 + bo, y + 17, er + (this.sauceBurst > 0 ? 3 : 0), flame);
+      g(x + 6 + bo, y + 17, er + (this.sauceBurst > 0 ? 3 : 0), flame);
+      if (this.sauceBurst > 0) g(x, y - 4, 18, '#ff3377', 0.65);
       if (p.lv('flamer')) g(x, y - 23, p.firing ? 5 : 3, p.firing ? '#ffaa22' : '#3388ff');
     }
     for (const s of p.sats) g(s.x, s.y, s.kind === 'ball' ? 10 : 6, s.kind === 'ball' ? '#33ccff' : '#ff3333', 0.8);
@@ -862,6 +1052,7 @@ export class World {
       else y = p.y + s * p.s * (p.z === 2 ? 1.2 : 0.7) + this.t * 0.05;
       y = ((y % H) + H) % H;
       const x = p.x + (th.ambient === 'spores' || th.ambient === 'bubbles' ? Math.sin(this.t * 0.02 + p.y) * 3 : 0);
+      if (x < -VIEW.ox - 2 || x > W + VIEW.ox) continue;
       if (th.ambient === 'bubbles' && p.z === 2) { ctx.strokeStyle = th.ambientColor; ctx.strokeRect(Math.round(x), Math.round(y), 2, 2); }
       else ctx.fillRect(Math.round(x), Math.round(y), p.z, p.z);
     }
@@ -942,7 +1133,7 @@ export class World {
     text(ctx, pre + String(ps.score).padStart(7, '0'), 4, 3, 'gold');
     text(ctx, 'HI ' + String(Math.max(this.host.hiScore(), ps.score)).padStart(7, '0'), 316, 3, 'metal', 1, 1);
     // bottom panel
-    ctx.drawImage(panel(), 0, H - 14);
+    ctx.drawImage(panel(), -VIEW.ox, H - 14);
     const max = ps.maxShield();
     const f = Math.max(0, ps.shield / max);
     text(ctx, '@', 2, H - 11, 'cyan');
@@ -975,7 +1166,16 @@ export class World {
       ctx.fillStyle = '#f42'; ctx.fillRect(110, 13, Math.round((cur / tot) * 100), 3);
     }
     if (this.player.superT > 0) text(ctx, 'SUPER ' + Math.ceil(this.player.superT / 50), 160, 14, 'cyan', 1, 0.5);
+    this.drawSauce(ctx);
+    this.drawChatter(ctx);
     if (this.player.dive > 0) text(ctx, 'DIVING', 160, H - 22, 'cyan', 1, 0.5);
+    // combo counter
+    if (this.combo >= 3) {
+      const big = this.combo >= 10;
+      text(ctx, 'x' + this.combo, 160, big ? 24 : 26, big ? 'cyan' : 'gold', big ? 2 : 1, 0.5);
+    }
+    // spawn warnings: chevrons at screen edges for incoming side-entry enemies
+    this.drawSpawnWarnings(ctx);
     // messages
     if (this.msgT > 0 && (this.msgStyle !== 'red' || this.msgT % 20 < 14)) text(ctx, this.msg, 160, 100, this.msgStyle, 2, 0.5);
     if (this.state === 'defused') this.drawDefused(ctx);
@@ -1009,6 +1209,24 @@ export class World {
     ctx.strokeStyle = '#ffffff'; ctx.strokeRect(x0 - 0.5, Math.round(vy) + 0.5, 41, Math.max(2, Math.round(16 * ch)));
   }
 
+  /** Side-entry warning chevrons: flashing indicators at screen edges for incoming enemies. */
+  drawSpawnWarnings(ctx: Ctx) {
+    for (const e of this.enemies.list) {
+      if (!e.alive || e.world) continue;
+      const ey = Math.round(e.y);
+      if (ey < 16 || ey > H - 20) continue;
+      ctx.fillStyle = this.t % 8 < 4 ? '#ff4422' : '#ffaa22';
+      const dx = e.x - e.ox;
+      const L = -VIEW.ox, R = W + VIEW.ox;
+      if (e.x < L - 5 && e.x > L - 50 && dx > 0) {
+        ctx.beginPath(); ctx.moveTo(L + 3, ey - 5); ctx.lineTo(L + 9, ey); ctx.lineTo(L + 3, ey + 5); ctx.fill();
+      }
+      if (e.x > R + 5 && e.x < R + 50 && dx < 0) {
+        ctx.beginPath(); ctx.moveTo(R - 3, ey - 5); ctx.lineTo(R - 9, ey); ctx.lineTo(R - 3, ey + 5); ctx.fill();
+      }
+    }
+  }
+
   drawDefused(ctx: Ctx) {
     const t = this.stateT;
     ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(40, 70, 240, 100);
@@ -1026,6 +1244,35 @@ export class World {
       text(ctx, 'DEFUSED', 190, 112, 'gold', 2, 0.5);
       text(ctx, 'BONUS ' + (this.lv.idx + 1) * 5000, 190, 140, 'cyan', 1, 0.5);
     } else text(ctx, 'DEFUSING...', 190, 112, 'red', 1, 0.5);
+    if (t > 100 && this.defusedQuip) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(12, 174, 296, 12);
+      text(ctx, this.defusedQuip, 160, 176, 'purple', 1, 0.5);
+    }
+  }
+
+  drawSauce(ctx: Ctx) {
+    if (this.sauce > 0 || this.sauceBurst > 0) this.sauceSeen = true;
+    if (!this.sauceSeen || this.host.demo) return;
+    const hot = this.sauceBurst > 0;
+    text(ctx, hot ? 'HOT' : 'SAUCE', 4, 14, hot && (this.t & 8) ? 'red' : 'purple');
+    const x0 = 36, bw = 62;
+    ctx.fillStyle = '#200810';
+    ctx.fillRect(x0, 16, bw, 4);
+    const amt = hot ? 1 : this.sauce / SAUCE_MAX;
+    ctx.fillStyle = hot ? ((this.t & 4) ? '#ff2266' : '#ffaa33') : '#ff4488';
+    ctx.fillRect(x0, 16, Math.max(hot ? bw : 0, Math.round(bw * amt)), 4);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(x0 + Math.round(bw * SAUCE_SAVE_AT / SAUCE_MAX), 15, 1, 6);
+  }
+
+  drawChatter(ctx: Ctx) {
+    if (this.chatterT <= 0 || !this.chatter) return;
+    const lines = wrap(this.chatter, 46).slice(0, 2);
+    const y0 = this.combo >= 3 ? 46 : 28;
+    ctx.fillStyle = 'rgba(12,0,10,0.62)';
+    ctx.fillRect(6, y0 - 1, 308, lines.length * 9 + 3);
+    lines.forEach((l, i) => text(ctx, l, 160, y0 + i * 9, this.sauceBurst > 0 ? 'red' : 'gold', 1, 0.5));
   }
 }
 

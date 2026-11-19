@@ -125,6 +125,10 @@ class AudioEngine {
   private nextTime = 0;
   private timer: number | null = null;
   private bassFilterBase = 400;
+  /** 0 = normal, 1 = boss (aggressive), 2 = critical shield (intense) */
+  setBassIntensity(level: number) {
+    this.bassFilterBase = [400, 800, 1200][Math.min(2, Math.max(0, level))] ?? 400;
+  }
 
   playMusic(name: string) {
     if (!this.ctx) { this.pendingTrack = name; return; }

@@ -479,6 +479,7 @@ export class Boss {
       const revive = this.parts.filter((q) => q.dead && !q.def.core && !req.has(q.def.id) && (q.def.guns?.length ?? 0) > 0).slice(0, 2);
       for (const q of revive) { q.dead = false; q.hp = q.max; q.flash = 10; w.fx.explode(this.px(q), this.py(q), 1); }
       w.say('PHASE 2', 100, 'red');
+      w.onPhase2();
       audio.play('alarm');
     }
     if (p.hp <= 0) {
@@ -489,6 +490,7 @@ export class Boss {
       audio.play('expM');
       w.addScore(1000);
       w.dropCash(x, y, 120, 4);
+      w.onBossBreak(!!p.def.core);
       if (p.def.core) {
         this.state = 'dying';
         this.dieT = 0;

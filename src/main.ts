@@ -1,4 +1,4 @@
-// Boot: canvas + integer scaling, 50 Hz fixed-timestep loop with interpolated rendering.
+// Boot: offscreen game canvas + WebGL presenter, 50 Hz fixed-timestep loop with interpolated rendering.
 import { input } from './engine/input';
 import { audio } from './engine/audio';
 import { buildSprites } from './art/sprites';
@@ -6,33 +6,54 @@ import { buildEnemies } from './game/enemies';
 import { buildBossArt } from './game/bosses';
 import { Game } from './game/Game';
 import { text } from './engine/font';
+import { Presenter } from './engine/post';
+import { VIEW, setViewWidth } from './engine/view';
 
-const canvas = document.getElementById('screen') as HTMLCanvasElement;
-const ctx = canvas.getContext('2d')!;
+const display = document.getElementById('screen') as HTMLCanvasElement;
+/** The game draws into this low-res canvas (VIEW.w × 256); the presenter scales it up to the window. */
+const canvas = document.createElement('canvas');
+canvas.width = 320; canvas.height = 256;
+let ctx = canvas.getContext('2d')!;
 ctx.imageSmoothingEnabled = false;
+const presenter = new Presenter(display);
+(window as any).postOk = presenter.ok;
 const wrapEl = document.getElementById('wrap')!;
 
 /**
- * Screen scaling modes (Options → SCREEN):
- *  fill    – as large as possible while keeping the 5:4 shape (default; fills one axis edge to edge)
- *  stretch – fills the whole window edge to edge, ignoring aspect ratio
- *  integer – largest whole-number multiple (sharpest pixels, may leave borders)
+ * Screen modes (Options → SCREEN). None of them stretch the image:
+ *  fill    – fills the window; on wide screens the view widens to show more of the world either side (default)
+ *  classic – the original 5:4 frame, as large as fits
+ *  integer – like fill, but at a whole-number scale (sharpest pixels, may leave thin borders)
  */
 function resize() {
   const mode: string = (window as any).game?.settings?.screen ?? 'fill';
   const vw = window.innerWidth, vh = window.innerHeight;
-  let w: number, h: number;
-  if (mode === 'stretch') { w = vw; h = vh; }
+  let s: number;
+  if (mode === 'classic') { setViewWidth(320); s = Math.min(vw / 320, vh / 256); }
   else {
-    const s = Math.min(vw / 320, vh / 256);
-    const k = mode === 'integer' && s >= 1 ? Math.floor(s) : s;
-    w = Math.floor(320 * k); h = Math.floor(256 * k);
+    s = Math.min(vh / 256, vw / 320);
+    if (mode === 'integer' && s >= 1) s = Math.floor(s);
+    setViewWidth(Math.floor(vw / s));
   }
-  canvas.style.width = `${w}px`;
-  canvas.style.height = `${h}px`;
-  wrapEl.style.width = canvas.style.width;
-  wrapEl.style.height = canvas.style.height;
+  if (canvas.width !== VIEW.w) {
+    canvas.width = VIEW.w;
+    ctx = canvas.getContext('2d')!;
+    ctx.imageSmoothingEnabled = false;
+  }
+  const w = Math.min(vw, Math.round(VIEW.w * s)), h = Math.min(vh, Math.round(256 * s));
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  display.width = Math.round(w * dpr); display.height = Math.round(h * dpr);
+  display.style.width = `${w}px`;
+  display.style.height = `${h}px`;
+  wrapEl.style.width = display.style.width;
+  wrapEl.style.height = display.style.height;
   (document.getElementById('crt') as HTMLElement).style.backgroundSize = `100% ${Math.max(2, h / 256)}px`;
+  const g = (window as any).game as Game | undefined;
+  if (g) { g.render(ctx, 1); present(); }
+}
+function present() {
+  const st = (window as any).game?.settings;
+  presenter.present(canvas, { bloom: st?.bloom ?? true, crt: !!st?.crt });
 }
 window.addEventListener('resize', resize);
 (window as any).resizeGame = resize;
@@ -48,11 +69,12 @@ window.addEventListener('keydown', (e) => {
 });
 document.addEventListener('fullscreenchange', resize);
 
-input.init(canvas);
+input.init(display);
 input.onFirstGesture.push(() => audio.init());
 
-ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 320, 256);
-text(ctx, 'LOADING...', 160, 124, 'metal', 1, 0.5);
+ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VIEW.w, 256);
+text(ctx, 'LOADING...', VIEW.w / 2, 124, 'metal', 1, 0.5);
+present();
 
 /** ?gentest=1 — generate 200 seeds × 15 levels, check fairness + determinism, report timings. */
 async function genTest() {
@@ -63,8 +85,9 @@ async function genTest() {
   let fails = 0, nondet = 0, maxMs = 0, total = 0, n = 0;
   const failures: string[] = [];
   const out = (msg: string) => {
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 320, 256);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, VIEW.w, 256);
     msg.split('\n').forEach((l, i) => text(ctx, l, 4, 4 + i * 10, 'metal'));
+    present();
   };
   for (let s = 0; s < SEEDS; s++) {
     const seed = (s * 2654435761 + 12345) >>> 0;
@@ -99,7 +122,7 @@ setTimeout(() => {
   (window as any).game = game;
   resize(); // apply the saved screen mode
   // test hook: advance the simulation synchronously (works even when the tab is hidden)
-  (window as any).step = (n: number) => { for (let i = 0; i < n; i++) { input.poll(); game.update(); } game.render(ctx, 1); };
+  (window as any).step = (n: number) => { for (let i = 0; i < n; i++) { input.poll(); game.update(); } game.render(ctx, 1); present(); };
   const STEP = 1000 / 50;
   let last = performance.now(), acc = 0;
   const frame = (now: number) => {
@@ -112,6 +135,7 @@ setTimeout(() => {
     }
     ctx.imageSmoothingEnabled = false;
     game.render(ctx, acc / STEP);
+    present();
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

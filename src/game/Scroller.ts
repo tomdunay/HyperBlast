@@ -5,11 +5,20 @@ import { makeCanvas, fbm, noise2, bayer, Ctx, RGB, RNG, hex } from '../engine/gf
 import { renderShapes, Shape } from '../art/sprites';
 import { glow } from '../engine/light';
 import { LevelDef, Theme, W, H, TILE, COLS } from './types';
+import { VIEW, MARGIN } from '../engine/view';
+
+/** Scenery is pre-rendered MARGIN px wider than the playfield on each side, for wide views. */
+const MW = MARGIN, FW = W + MARGIN * 2;
 
 interface Light { x: number; y: number; color: string; phase: number; r: number }
-interface Art { fg: HTMLCanvasElement; mask: Uint8Array; bg: HTMLCanvasElement; near: HTMLCanvasElement; shadow: HTMLCanvasElement; lights: Light[]; caustics: HTMLCanvasElement[] }
+interface Art { fg: HTMLCanvasElement; mask: Uint8Array; bg: HTMLCanvasElement; shadow: HTMLCanvasElement; lights: Light[]; caustics: HTMLCanvasElement[] }
 
-const foreCache = new WeakMap<Theme, HTMLCanvasElement>();
+const foreCache = new Map<string, HTMLCanvasElement>();
+const nearCache = new Map<string, HTMLCanvasElement>();
+const themeIds = new WeakMap<Theme, number>();
+let themeN = 0;
+/** cache key for view-width dependent layers */
+const themeKey = (th: Theme) => { let id = themeIds.get(th); if (id === undefined) { id = ++themeN; themeIds.set(th, id); } return id + '|' + VIEW.w; };
 const BH = 480; // background tile height: a multiple of every pattern period so it wraps seamlessly
 
 export class Scroller {
@@ -18,8 +27,9 @@ export class Scroller {
   mask!: Uint8Array;
   fg!: HTMLCanvasElement;
   bg!: HTMLCanvasElement;
-  near!: HTMLCanvasElement;
   shadow!: HTMLCanvasElement;
+  /** solid mask across the full pre-rendered width (playfield + both margins), build time only */
+  private wide = new Uint8Array(0);
   lights: Light[] = [];
   caustics: HTMLCanvasElement[] = [];
   y = 0;
@@ -35,14 +45,18 @@ export class Scroller {
     let art = Scroller.cache.get(lv);
     if (!art) {
       this.mask = new Uint8Array(W * this.hpx);
+      this.wide = new Uint8Array(FW * this.hpx);
       this.lights = [];
       this.buildFg();
       art = {
-        fg: this.fg, mask: this.mask, bg: buildBackground(lv.theme), near: buildNear(lv.theme), shadow: this.buildShadow(),
+        fg: this.fg, mask: this.mask, bg: buildBackground(lv.theme), shadow: this.buildShadow(),
         lights: this.lights, caustics: lv.theme.ambient === 'bubbles' ? buildCaustics() : [],
       };
-      Scroller.cache.set(lv, art);
-    }
+      this.wide = new Uint8Array(0);
+      // wide scenery canvases are big: keep only the two most recently used levels
+      while (Scroller.cache.size >= 2) Scroller.cache.delete(Scroller.cache.keys().next().value!);
+    } else Scroller.cache.delete(lv);
+    Scroller.cache.set(lv, art);
     Object.assign(this, art);
   }
 
@@ -53,48 +67,104 @@ export class Scroller {
       rTop = Math.max(0, Math.min(nRows - 1, rTop));
       return lv.rows[nRows - 1 - rTop][c];
     };
-    const field = new Float32Array(W * Hp);
+    // the field covers the playfield plus a margin either side; the margins continue the edge tiles and close up
+    // into organic cave walls further out (purely visual: collision only uses the playfield part)
+    const field = new Float32Array(FW * Hp);
     for (let py = 0; py < Hp; py++) {
       const ty = py / TILE - 0.5, r0 = Math.floor(ty), fy = ty - r0;
-      for (let px = 0; px < W; px++) {
+      for (let fxp = 0; fxp < FW; fxp++) {
+        const px = fxp - MW;
         const tx = px / TILE - 0.5, c0 = Math.floor(tx), fx = tx - c0;
         const a = tileAt(c0, r0), b = tileAt(c0 + 1, r0), c = tileAt(c0, r0 + 1), d = tileAt(c0 + 1, r0 + 1);
         let v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+        if (px < 0 || px >= W) {
+          const out = (px < 0 ? -px : px - W + 1) / MW;
+          const n = fbm(px * 0.018, py * 0.018, 57, 3);
+          v = Math.max(v, Math.min(1, out * 1.5 + (n - 0.5) * 1.6 - 0.18));
+        }
         if (th.wobble > 0 && v > 0.02 && v < 0.98) v += (fbm(px * 0.07, py * 0.07, 7, 2) - 0.5) * th.wobble * 2;
-        field[py * W + px] = v;
+        field[py * FW + fxp] = v;
       }
     }
-    const [cv, ctx] = makeCanvas(W, Hp);
-    const img = ctx.createImageData(W, Hp);
-    const out = new Uint32Array(img.data.buffer);
-    const hgt = (i: number) => Math.max(0, Math.min(1, (field[i] - 0.5) * 3.2));
-    const pack = (c: RGB) => (0xff000000 | (c[2] << 16) | (c[1] << 8) | c[0]) >>> 0;
+    const N = FW * Hp;
+    // 1) solid masks
+    for (let py = 1; py < Hp - 1; py++) for (let fxp = 0; fxp < FW; fxp++) {
+      const i = py * FW + fxp;
+      if (field[i] <= 0.5) continue;
+      this.wide[i] = 1;
+      const px = fxp - MW;
+      if (px >= 0 && px < W) this.mask[py * W + px] = 1;
+    }
+    // 2) chamfer (3-4) distance to the nearest open pixel, capped: the basis of the rock relief
+    const R = th.tex === 'metal' || th.tex === 'biomech' ? 9 : 20; // bevel radius in px (machined vs organic)
+    const CAP = R * 3;
+    const dist = new Uint16Array(N);
+    const wide = this.wide;
+    for (let i = 0; i < N; i++) dist[i] = wide[i] ? CAP : 0;
+    for (let y = 1; y < Hp; y++) for (let x = 0; x < FW; x++) {
+      const i = y * FW + x;
+      if (!dist[i]) continue;
+      let v = dist[i];
+      if (x > 0) { v = Math.min(v, dist[i - 1] + 3, dist[i - FW - 1] + 4); }
+      v = Math.min(v, dist[i - FW] + 3);
+      if (x < FW - 1) v = Math.min(v, dist[i - FW + 1] + 4);
+      dist[i] = v;
+    }
+    for (let y = Hp - 2; y >= 0; y--) for (let x = FW - 1; x >= 0; x--) {
+      const i = y * FW + x;
+      if (!dist[i]) continue;
+      let v = dist[i];
+      if (x < FW - 1) { v = Math.min(v, dist[i + 1] + 3, dist[i + FW + 1] + 4); }
+      v = Math.min(v, dist[i + FW] + 3);
+      if (x > 0) v = Math.min(v, dist[i + FW - 1] + 4);
+      dist[i] = v;
+    }
+    // 3) height map: rounded bevel from the distance + embossed surface texture
+    const hmap = new Float32Array(N), texL = new Float32Array(N), texA = new Uint8Array(N);
     const metal = th.tex === 'metal' || th.tex === 'biomech';
+    for (let py = 0; py < Hp; py++) for (let fxp = 0; fxp < FW; fxp++) {
+      const i = py * FW + fxp;
+      if (!wide[i]) continue;
+      const px = fxp - MW;
+      const t = texture(th, px, py);
+      texL[i] = t.l; texA[i] = t.alt ? 1 : 0;
+      const d = Math.min(1, dist[i] / CAP);
+      const dome = metal ? Math.min(1, d * 1.6) : 1 - (1 - d) * (1 - d);
+      const lump = metal ? 0 : (fbm(px * 0.045, py * 0.045, 33, 3) - 0.5) * 0.55 * Math.min(1, d * 2);
+      hmap[i] = dome + lump + t.l * (metal ? 0.3 : 0.22);
+    }
+    // 4) light it: Lambert from the upper left, specular on metal, ambient occlusion in the deep interior
+    const [cv, ctx] = makeCanvas(FW, Hp);
+    const img = ctx.createImageData(FW, Hp);
+    const out = new Uint32Array(img.data.buffer);
+    const pack = (c: RGB) => (0xff000000 | (c[2] << 16) | (c[1] << 8) | c[0]) >>> 0;
+    const LL = Math.hypot(0.55, 0.7, 0.62), Lx = -0.55 / LL, Ly = -0.7 / LL, Lz = 0.62 / LL;
+    const K = metal ? 9 : 7;
     for (let py = 1; py < Hp - 1; py++) {
-      for (let px = 0; px < W; px++) {
-        const i = py * W + px;
-        if (field[i] <= 0.5) continue;
-        this.mask[i] = 1;
-        const h = hgt(i);
-        const dhx = hgt(i + (px < W - 1 ? 1 : 0)) - hgt(i - (px > 0 ? 1 : 0));
-        const dhy = hgt(i + W) - hgt(i - W);
-        let l = 0.42 + (dhx + dhy) * 2.2 * (1 - h * 0.5);
-        const t = texture(th, px, py);
-        l += t.l;
+      for (let fxp = 1; fxp < FW - 1; fxp++) {
+        const i = py * FW + fxp;
+        if (!wide[i]) continue;
+        const px = fxp - MW;
+        const hx = (hmap[i + 1] - hmap[i - 1]) * K, hy = (hmap[i + FW] - hmap[i - FW]) * K;
+        const nl = Math.hypot(hx, hy, 1);
+        const lam = (-hx * Lx - hy * Ly + Lz) / nl;
+        let l = 0.06 + Math.max(0, lam) * 0.82;
+        l += texL[i] * 0.55;
         // large-scale strata / plate variation
-        l += (fbm(px * 0.011, py * 0.011, 21, 2) - 0.5) * 0.42;
-        // deep interior is darker, like it recedes into shadow
-        if (h >= 1) l -= Math.min(0.18, (fbm(px * 0.03, py * 0.03, 5, 2) - 0.3) * 0.3);
-        // specular glint on metal faces
-        if (metal && (dhx + dhy) > 0.25 && ((px + py) & 7) === 0) l += 0.35;
-        const ramp = t.alt ? th.alt : th.rock;
-        let idx = Math.round(l * (ramp.length - 1) + bayer(px, py) * 0.9);
+        l += (fbm(px * 0.011, py * 0.011, 21, 2) - 0.5) * 0.34;
+        // deep interior recedes into shadow (ambient occlusion)
+        const d = dist[i] / CAP;
+        if (d >= 1) l -= Math.min(0.2, Math.max(0, fbm(px * 0.03, py * 0.03, 5, 2) - 0.3) * 0.35);
+        // specular: half-vector towards a viewer straight above
+        const hz = (-hx * Lx * 0.5 - hy * Ly * 0.5 + (Lz + 1) * 0.5) / nl;
+        if (hz > (metal ? 0.9 : 0.955)) l += metal ? 0.4 : 0.22;
+        const ramp = texA[i] ? th.alt : th.rock;
+        let idx = Math.round(l * (ramp.length - 1) + bayer(px, py) * 0.85);
         // rim highlight on edges facing the light, dark contact line on the far side
-        const emptyUL = field[i - W - 1] <= 0.5 || field[i - W] <= 0.5 || (px > 0 && field[i - 1] <= 0.5);
-        const emptyDR = field[i + W + 1] <= 0.5 || field[i + W] <= 0.5 || (px < W - 1 && field[i + 1] <= 0.5);
-        if (h < 0.09) idx = 0;
-        if (emptyUL && h < 0.25) idx = ramp.length - 1 - (((px + py) & 1) ? 1 : 0);
-        else if (emptyDR && h < 0.25) idx = 0;
+        const emptyUL = !wide[i - FW - 1] || !wide[i - FW] || !wide[i - 1];
+        const emptyDR = !wide[i + FW + 1] || !wide[i + FW] || !wide[i + 1];
+        if (emptyUL) idx = Math.max(idx, ramp.length - 1 - (((px + py) & 1) ? 1 : 0));
+        else if (emptyDR) idx = 0;
         out[i] = pack(ramp[Math.max(0, Math.min(ramp.length - 1, idx))]);
       }
     }
@@ -119,23 +189,39 @@ export class Scroller {
       const s = d.spr;
       const cx = side === 'L' ? ex - d.inset : ex + d.inset;
       ctx.save();
-      ctx.translate(Math.round(cx), py);
+      ctx.translate(Math.round(cx) + MW, py);
       if (side === 'R') ctx.scale(-1, 1);
       if (d.rot) ctx.rotate(side === 'L' ? Math.PI / 2 : Math.PI / 2);
       ctx.drawImage(s, -(s.width >> 1), -(s.height >> 1));
       ctx.restore();
       if (d.light) this.lights.push({ x: Math.round(cx), y: py, color: d.light, phase: rng.next() * 6, r: d.lightR ?? 6 });
     }
+    // decorations on the cave walls out in the margins (inward-facing edges only)
+    for (let py = 40; py < Hp - 40; py += rng.int(18, 34)) {
+      const side = rng.next() < 0.5 ? 'L' : 'R';
+      let ex = -9999;
+      if (side === 'L') { for (let fx = 2; fx < MW - 4; fx++) if (this.wide[py * FW + fx] && !this.wide[py * FW + fx + 1]) { ex = fx - MW; break; } }
+      else { for (let fx = FW - 3; fx > FW - MW + 4; fx--) if (this.wide[py * FW + fx] && !this.wide[py * FW + fx - 1]) { ex = fx - MW; break; } }
+      if (ex === -9999) continue;
+      const d = rng.pick(set.edge), sp = d.spr;
+      const cx = side === 'L' ? ex - d.inset : ex + d.inset;
+      ctx.save();
+      ctx.translate(Math.round(cx) + MW, py);
+      if (side === 'R') ctx.scale(-1, 1);
+      ctx.drawImage(sp, -(sp.width >> 1), -(sp.height >> 1));
+      ctx.restore();
+      if (d.light) this.lights.push({ x: Math.round(cx), y: py, color: d.light, phase: rng.next() * 6, r: d.lightR ?? 6 });
+    }
     // fossils / panels embedded deep inside walls
     if (set.inner.length) {
-      for (let k = 0; k < Hp / 22; k++) {
-        const x = rng.int(10, W - 10), y = rng.int(20, Hp - 20);
+      for (let k = 0; k < (Hp * FW) / W / 22; k++) {
+        const x = rng.int(10 - MW, W + MW - 10), y = rng.int(20, Hp - 20);
         let solid = true;
-        for (let dy = -9; dy <= 9 && solid; dy += 3) for (let dx = -9; dx <= 9; dx += 3) if (!this.mask[(y + dy) * W + x + dx]) { solid = false; break; }
+        for (let dy = -9; dy <= 9 && solid; dy += 3) for (let dx = -9; dx <= 9; dx += 3) if (!this.wide[(y + dy) * FW + x + dx + MW]) { solid = false; break; }
         if (!solid) continue;
         const d = rng.pick(set.inner);
         ctx.globalAlpha = 0.85;
-        ctx.drawImage(d.spr, x - (d.spr.width >> 1), y - (d.spr.height >> 1));
+        ctx.drawImage(d.spr, x + MW - (d.spr.width >> 1), y - (d.spr.height >> 1));
         ctx.globalAlpha = 1;
         if (d.light) this.lights.push({ x, y, color: d.light, phase: rng.next() * 6, r: d.lightR ?? 5 });
       }
@@ -145,17 +231,17 @@ export class Scroller {
 
   /** Dithered drop shadow of the scenery cast down-right onto the background layers. */
   private buildShadow(): HTMLCanvasElement {
-    const Hp = this.hpx, m = this.mask;
-    const [c, ctx] = makeCanvas(W, Hp);
-    const img = ctx.createImageData(W, Hp);
+    const Hp = this.hpx, m = this.wide;
+    const [c, ctx] = makeCanvas(FW, Hp);
+    const img = ctx.createImageData(FW, Hp);
     const d = new Uint32Array(img.data.buffer);
     const dark = (0xb4 << 24) >>> 0 | 0x0a0004;
     const light = (0x70 << 24) >>> 0 | 0x0a0004;
-    for (let y = 9; y < Hp; y++) for (let x = 7; x < W; x++) {
-      const i = y * W + x;
-      if (m[i] || !m[(y - 9) * W + x - 7]) continue;
+    for (let y = 9; y < Hp; y++) for (let x = 7; x < FW; x++) {
+      const i = y * FW + x;
+      if (m[i] || !m[(y - 9) * FW + x - 7]) continue;
       // softer outer band
-      const inner = m[(y - 12) * W + Math.max(0, x - 10)];
+      const inner = m[(y - 12) * FW + Math.max(0, x - 10)];
       d[i] = inner ? dark : ((x + y) & 1 ? light : 0);
     }
     ctx.putImageData(img, 0, 0);
@@ -195,29 +281,37 @@ export class Scroller {
       const r = c0[0] + (c1[0] - c0[0]) * k, g = c0[1] + (c1[1] - c0[1]) * k, b = c0[2] + (c1[2] - c0[2]) * k;
       const q = (v: number, add: number) => Math.min(255, Math.round((v + add) / 17) * 17);
       ctx.fillStyle = `rgb(${q(r, r * bar + 18 * bar)},${q(g, g * bar + 24 * bar)},${q(b, b * bar + 40 * bar)})`;
-      ctx.fillRect(0, y, W, 2);
+      ctx.fillRect(-VIEW.ox, y, VIEW.w, 2);
     }
     const tile = (img: HTMLCanvasElement, f: number) => {
       const off = Math.round((s * f) % BH);
-      for (let y = off - BH; y < H; y += BH) ctx.drawImage(img, 0, y);
+      for (let y = off - BH; y < H; y += BH) ctx.drawImage(img, -MW, y);
     };
     tile(this.bg, 0.35);
-    tile(this.near, 0.7);
+    const nk = themeKey(th);
+    let near = nearCache.get(nk);
+    if (!near) { near = buildNear(th); nearCache.set(nk, near); }
+    tile(near, 0.7);
     if (this.caustics.length) {
       const f = this.caustics[Math.floor(t / 6) % this.caustics.length];
       ctx.globalCompositeOperation = 'lighter';
-      const off = Math.round((s * 0.7) % 256);
-      for (let y = off - 256; y < H; y += 256) ctx.drawImage(f, 0, y, W, 256);
+      this.tileCaustics(ctx, f, Math.round((s * 0.7) % 256));
       ctx.globalCompositeOperation = 'source-over';
     }
   }
-  /** Foreground silhouettes rushing past at 1.45x — sells the sense of speed and depth. */
+  /** Caustic frames (160×128, drawn at 2×) tiled across the whole view. */
+  private tileCaustics(ctx: Ctx, f: HTMLCanvasElement, off: number) {
+    const x0 = -Math.ceil(VIEW.ox / 320) * 320;
+    for (let y = off - 256; y < H; y += 256) for (let x = x0; x < W + VIEW.ox; x += 320) ctx.drawImage(f, x, y, 320, 256);
+  }
+  /** Foreground silhouettes rushing past at 1.45x, hugging the view edges — sells the sense of speed and depth. */
   drawFore(ctx: Ctx, alpha: number) {
     const th = this.lv.theme;
-    let fore = foreCache.get(th);
-    if (!fore) { fore = buildFore(th); foreCache.set(th, fore); }
+    const k = themeKey(th);
+    let fore = foreCache.get(k);
+    if (!fore) { fore = buildFore(th); foreCache.set(k, fore); }
     const off = Math.round((this.scrollAt(alpha) * 1.45) % BH);
-    for (let y = off - BH; y < H; y += BH) ctx.drawImage(fore, 0, y);
+    for (let y = off - BH; y < H; y += BH) ctx.drawImage(fore, -VIEW.ox, y);
   }
   drawShadow(ctx: Ctx, alpha: number) { this.blit(ctx, this.shadow, alpha); }
   drawFg(ctx: Ctx, alpha: number) { this.blit(ctx, this.fg, alpha); }
@@ -225,7 +319,7 @@ export class Scroller {
     const top = this.topRow(this.scrollAt(alpha));
     const sy = Math.max(0, top), dy = sy - top;
     const h = Math.min(H - dy, this.hpx - sy);
-    if (h > 0) ctx.drawImage(c, 0, sy, W, h, 0, dy, W, h);
+    if (h > 0) ctx.drawImage(c, MW - VIEW.ox, sy, VIEW.w, h, -VIEW.ox, dy, VIEW.w, h);
   }
   /** Additive running lights embedded in the scenery, plus caustic shimmer over the walls. */
   drawLights(ctx: Ctx, alpha: number, t: number) {
@@ -235,6 +329,7 @@ export class Scroller {
       const y = L.y - top;
       if (y < -20) continue;
       if (y > H + 20) break;
+      if (L.x < -VIEW.ox - 20 || L.x > W + VIEW.ox + 20) continue;
       const on = Math.sin(t * 0.08 + L.phase) > -0.3;
       if (!on) continue;
       const g = glow(L.r + (Math.sin(t * 0.2 + L.phase) > 0.6 ? 2 : 0), L.color);
@@ -243,8 +338,7 @@ export class Scroller {
     if (this.caustics.length) {
       ctx.globalAlpha = 0.45;
       const f = this.caustics[(Math.floor(t / 6) + 3) % this.caustics.length];
-      const off = Math.round((this.scrollAt(alpha)) % 256);
-      for (let y = off - 256; y < H; y += 256) ctx.drawImage(f, 0, y, W, 256);
+      this.tileCaustics(ctx, f, Math.round(this.scrollAt(alpha) % 256));
       ctx.globalAlpha = 1;
     }
     ctx.globalCompositeOperation = 'source-over';
@@ -399,6 +493,7 @@ function harden(ctx: Ctx, w: number, h: number) {
 
 /** Near-FOREGROUND silhouettes (1.45x parallax) hugging the screen edges, drawn over everything but the HUD. */
 export function buildFore(th: Theme): HTMLCanvasElement {
+  const W = VIEW.w; // built per view width so the silhouettes always hug the visible edges
   const [c, ctx] = makeCanvas(W, BH);
   const rng = new RNG(7 + th.tex.length * 3);
   const dark = `rgb(${th.far[0].map((v) => Math.round(v * 0.5)).join(',')})`;
@@ -431,51 +526,54 @@ export function buildFore(th: Theme): HTMLCanvasElement {
 
 /** Near-background prop layer (0.7x parallax), transparent except for theme props. */
 function buildNear(th: Theme): HTMLCanvasElement {
-  const [c, ctx] = makeCanvas(W, BH);
+  const [c, ctx] = makeCanvas(FW, BH);
+  ctx.translate(MW, 0);
+  // props hug the view edges; wide views also get extra props out in the margins
+  const L = -VIEW.ox, R = W + VIEW.ox, extra = Math.round(VIEW.ox / 40);
   const f = th.far, base = `rgb(${f[3].join(',')})`, hi = `rgb(${f[3].map((v) => Math.min(255, v + 34)).join(',')})`, lo = `rgb(${f[1].join(',')})`;
   const rng = new RNG(99 + th.tex.length);
   ctx.lineCap = 'round';
   const stroke = (w: number, col: string, path: () => void) => { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.beginPath(); path(); ctx.stroke(); };
   switch (th.tex) {
     case 'coral':
-      for (let k = 0; k < 9; k++) {
-        const x0 = rng.range(20, 300), amp = rng.range(6, 16), ph = rng.range(0, 6), w = rng.int(3, 5);
+      for (let k = 0; k < 9 + extra; k++) {
+        const x0 = rng.range(L + 20, R - 20), amp = rng.range(6, 16), ph = rng.range(0, 6), w = rng.int(3, 5);
         const path = () => { for (let y = 0; y <= BH; y += 8) { const x = x0 + Math.sin((y / BH) * Math.PI * 4 + ph) * amp; y ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } };
         stroke(w + 2, lo, path); stroke(w, base, path); stroke(1, hi, path);
       }
       break;
     case 'bone':
       for (let y = 40; y < BH; y += 120) for (const side of [0, 1]) {
-        const x0 = side ? W + 10 : -10, dir = side ? -1 : 1;
+        const x0 = side ? R + 10 : L - 10, dir = side ? -1 : 1;
         const path = () => { ctx.moveTo(x0, y); ctx.quadraticCurveTo(x0 + dir * 130, y - 40, x0 + dir * 120, y + 60); };
         stroke(9, lo, path); stroke(7, base, path); stroke(2, hi, path);
       }
       break;
     case 'vine':
-      for (let k = 0; k < 8; k++) {
-        const x0 = rng.range(10, 310), ph = rng.range(0, 6);
+      for (let k = 0; k < 8 + extra; k++) {
+        const x0 = rng.range(L + 10, R - 10), ph = rng.range(0, 6);
         const path = () => { for (let y = 0; y <= BH; y += 6) { const x = x0 + Math.sin((y / BH) * Math.PI * 6 + ph) * 10; y ? ctx.lineTo(x, y) : ctx.moveTo(x, y); } };
         stroke(4, lo, path); stroke(2, base, path);
         for (let y = 10; y < BH; y += 24) { const x = x0 + Math.sin((y / BH) * Math.PI * 6 + ph) * 10; ctx.fillStyle = base; ctx.beginPath(); ctx.ellipse(x + 4, y, 5, 2, 0.5, 0, Math.PI * 2); ctx.fill(); }
       }
       break;
     case 'biomech':
-      for (const x of [36, 284]) { ctx.fillStyle = lo; ctx.fillRect(x - 8, 0, 16, BH); ctx.fillStyle = base; ctx.fillRect(x - 6, 0, 12, BH); ctx.fillStyle = hi; ctx.fillRect(x - 3, 0, 2, BH); for (let y = 0; y < BH; y += 60) { ctx.fillStyle = lo; ctx.fillRect(x - 10, y, 20, 8); ctx.fillStyle = hi; ctx.fillRect(x - 10, y, 20, 1); } }
-      for (let y = 30; y < BH; y += 160) { ctx.fillStyle = lo; ctx.fillRect(0, y - 6, W, 12); ctx.fillStyle = base; ctx.fillRect(0, y - 4, W, 8); ctx.fillStyle = hi; ctx.fillRect(0, y - 3, W, 1); }
+      for (const x of [36, 284, ...(VIEW.ox > 50 ? [L + 30, R - 30] : [])]) { ctx.fillStyle = lo; ctx.fillRect(x - 8, 0, 16, BH); ctx.fillStyle = base; ctx.fillRect(x - 6, 0, 12, BH); ctx.fillStyle = hi; ctx.fillRect(x - 3, 0, 2, BH); for (let y = 0; y < BH; y += 60) { ctx.fillStyle = lo; ctx.fillRect(x - 10, y, 20, 8); ctx.fillStyle = hi; ctx.fillRect(x - 10, y, 20, 1); } }
+      for (let y = 30; y < BH; y += 160) { ctx.fillStyle = lo; ctx.fillRect(L, y - 6, R - L, 12); ctx.fillStyle = base; ctx.fillRect(L, y - 4, R - L, 8); ctx.fillStyle = hi; ctx.fillRect(L, y - 3, R - L, 1); }
       break;
     case 'metal':
-      for (const x of [24, 296]) {
+      for (const x of [24, 296, ...(VIEW.ox > 50 ? [L + 26, R - 26] : [])]) {
         ctx.fillStyle = base; ctx.fillRect(x - 5, 0, 10, BH);
         ctx.fillStyle = hi; ctx.fillRect(x - 5, 0, 1, BH);
         for (let y = 0; y < BH; y += 40) stroke(2, lo, () => { ctx.moveTo(x - 5, y); ctx.lineTo(x + (x < 160 ? 40 : -40), y + 40); });
       }
-      for (let y = 0; y < BH; y += 96) { ctx.fillStyle = lo; ctx.fillRect(0, y, W, 6); ctx.fillStyle = hi; ctx.fillRect(0, y, W, 1); }
+      for (let y = 0; y < BH; y += 96) { ctx.fillStyle = lo; ctx.fillRect(L, y, R - L, 6); ctx.fillStyle = hi; ctx.fillRect(L, y, R - L, 1); }
       break;
     case 'crystal':
       // giant translucent shards leaning in from the sides
       for (let k = 0; k < 10; k++) {
         const side = k % 2, y = (k * 53 + rng.int(0, 30)) % BH, len = rng.range(50, 110), wd = rng.range(10, 22);
-        const x0 = side ? W + 4 : -4, dir = side ? -1 : 1, tilt = rng.range(-0.5, 0.5);
+        const x0 = side ? R + 4 : L - 4, dir = side ? -1 : 1, tilt = rng.range(-0.5, 0.5);
         ctx.fillStyle = lo; ctx.beginPath(); ctx.moveTo(x0, y - wd); ctx.lineTo(x0 + dir * len, y + tilt * len); ctx.lineTo(x0, y + wd); ctx.fill();
         ctx.fillStyle = base; ctx.beginPath(); ctx.moveTo(x0, y - wd * 0.6); ctx.lineTo(x0 + dir * len * 0.95, y + tilt * len); ctx.lineTo(x0, y); ctx.fill();
         stroke(1, hi, () => { ctx.moveTo(x0, y - wd * 0.6); ctx.lineTo(x0 + dir * len * 0.95, y + tilt * len); });
@@ -483,7 +581,7 @@ function buildNear(th: Theme): HTMLCanvasElement {
       break;
     case 'lava':
       // basalt columns with glowing seams
-      for (const x of [18, 50, 270, 302]) {
+      for (const x of [18, 50, 270, 302, ...(VIEW.ox > 40 ? [L + 14, R - 14] : [])]) {
         const w = 22;
         ctx.fillStyle = lo; ctx.fillRect(x - w / 2, 0, w, BH);
         ctx.fillStyle = base; ctx.fillRect(x - w / 2 + 2, 0, w - 6, BH);
@@ -492,13 +590,14 @@ function buildNear(th: Theme): HTMLCanvasElement {
       }
       break;
   }
-  harden(ctx, W, BH);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  harden(ctx, FW, BH);
   return c;
 }
 
 function buildBackground(th: Theme): HTMLCanvasElement {
-  const [c, ctx] = makeCanvas(W, BH);
-  const img = ctx.createImageData(W, BH);
+  const [c, ctx] = makeCanvas(FW, BH);
+  const img = ctx.createImageData(FW, BH);
   const d = new Uint32Array(img.data.buffer);
   const far = th.far;
   // periodic noise: blend sample at y and y-BH
@@ -507,7 +606,8 @@ function buildBackground(th: Theme): HTMLCanvasElement {
     return fbm(x * s, y * s, seed, 3) * (1 - t) + fbm(x * s, (y - BH) * s, seed, 3) * t;
   };
   for (let y = 0; y < BH; y++)
-    for (let x = 0; x < W; x++) {
+    for (let fx = 0; fx < FW; fx++) {
+      const x = fx - MW;
       let v: number;
       switch (th.tex) {
         case 'metal': {
@@ -524,14 +624,14 @@ function buildBackground(th: Theme): HTMLCanvasElement {
         }
         default: {
           const n = pn(x, y, 0.018, 5);
-          const edge = Math.min(x, W - x) / W;
+          const edge = Math.max(-0.25, Math.min(x, W - x) / W);
           v = n + (0.3 - edge) * 0.9 > 0.62 ? (n - 0.4) * 2 : -1;
         }
       }
       if (v < 0) continue;
       const idx = Math.max(0, Math.min(far.length - 1, Math.round(v * (far.length - 1) + bayer(x, y))));
       const col = far[idx];
-      d[y * W + x] = (0xff000000 | (col[2] << 16) | (col[1] << 8) | col[0]) >>> 0;
+      d[y * FW + fx] = (0xff000000 | (col[2] << 16) | (col[1] << 8) | col[0]) >>> 0;
     }
   ctx.putImageData(img, 0, 0);
   return c;

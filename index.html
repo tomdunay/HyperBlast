@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>HYPERBLAST</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+    #wrap { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+    #crt { position: absolute; inset: 0; pointer-events: none; display: none;
+      background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0, rgba(0,0,0,0) 50%, rgba(0,0,0,.28) 50%, rgba(0,0,0,.28) 100%);
+      box-shadow: inset 0 0 80px rgba(0,0,0,.7); }
+    #crt.on { display: block; }
+    .tbtn { position: fixed; border-radius: 50%; border: 2px solid rgba(255,255,255,.35); background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.6); font: bold 14px monospace; display: none; align-items: center; justify-content: center; user-select: none; }
+    body.touch .tbtn { display: flex; }
+  </style>
+</head>
+<body>
+  <div id="wrap"><canvas id="screen" width="320" height="256"></canvas><div id="crt"></div></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

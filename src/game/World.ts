@@ -30,7 +30,7 @@ export interface Host {
   regen?(): void; seedLabel?(): string;
 }
 interface EBullet { alive: boolean; x: number; y: number; ox: number; oy: number; vx: number; vy: number; spr: Spr; dmg: number; r: number; graze: number } // graze: 0 = none, 1 = inside graze zone, 2 = done
-interface Pickup { alive: boolean; kind: 'cash' | 'token'; val: number; tok: TokenType; x: number; y: number; ox: number; oy: number; vx: number; vy: number; t: number; life: number }
+interface Pickup { alive: boolean; kind: 'cash' | 'token' | 'repair'; val: number; tok: TokenType; x: number; y: number; ox: number; oy: number; vx: number; vy: number; t: number; life: number }
 
 const BULLET_DMG: Record<string, number> = { eOrb: 9, eBig: 16, eNeedle: 8, eSpore: 8, ePlasma: 11 };
 const TOKEN_GLOW: Record<string, string> = { P: '#ff4433', S: '#33ccff', H: '#44ff44', $: '#ffcc22', Z: '#cc55ff', D: '#3366ff', X: '#ffffff', '1': '#ff9922' };
@@ -107,6 +107,8 @@ export class World {
   eb = new Pool<EBullet>(() => ({ alive: false } as EBullet), 300);
   pickups = new Pool<Pickup>(() => ({ alive: false } as Pickup), 64);
   boss: Boss | null = null;
+  /** ticks since the last repair cell dropped (drives the cooldown and the pity drop) */
+  repairDry = 0;
   bossKind: 'mid' | 'end' | null = null;
   spawnState: Uint8Array;
   waves: { sp: SpawnDef; left: number; timer: number; k: number }[] = [];
@@ -296,6 +298,7 @@ export class World {
     this.updatePlayerBullets();
     this.updateEnemies();
     this.updateEnemyBullets();
+    this.repairDry++;
     this.updatePickups();
     if (this.boss) this.updateBoss();
     this.fx.update(this.scrollDelta);
@@ -616,6 +619,7 @@ export class World {
     if (!d.noCash) this.dropCash(e.x, e.y, d.cash * (e.elite ? 2.5 : 1), d.expl === 2 ? 6 : 4);
     if (e.elite) { this.addScore(d.score * 2); this.fx.floatText(e.x, e.y - 10, 'ELITE', 'gold'); this.fx.ring(e.x, e.y, e.world); }
     if (e.token) this.dropToken(e.x, e.y, e.token as TokenType);
+    this.maybeRepair(e);
     if (d.name === 'sporepod') for (let i = 0; i < 4; i++) this.spawnEnemy('spore', e.x, e.y, 'chase', { s: 0.8, life: 300 }, false);
     if (d.splitInto) for (let i = 0; i < d.splitInto.n; i++) {
       const c = this.spawnEnemy(d.splitInto.type, e.x + (i - 1) * 8, e.y, 'chase', { s: 1.3, life: 260 }, false);
@@ -691,6 +695,26 @@ export class World {
       amount -= v; n++;
     }
   }
+  /**
+   * Repair cells: rare, need-based shield drops. Nothing drops while the shield is
+   * healthy; the chance climbs as it runs low, there's a cooldown between drops and
+   * only one can be on screen. A long dry spell at low shield guarantees one.
+   */
+  maybeRepair(e: Enemy) {
+    if (e.world || e.def.name === 'capsule' || e.def.name === 'spore') return;
+    const ps = this.ps;
+    const miss = 1 - ps.shield / ps.maxShield();
+    if (miss < 0.3 || this.repairDry < 480) return;
+    for (const k of this.pickups.list) if (k.alive && k.kind === 'repair') return;
+    let chance = 0.015 + (miss - 0.3) * 0.12;      // ~1.5% at 70% shield, ~9.9% near empty
+    if (e.elite) chance *= 3;
+    if (this.dir.threat < 0) chance *= 1.3;          // struggling players get a little more
+    const pity = miss > 0.6 && this.repairDry > 1800; // 30s without one at low shield
+    if (!pity && Math.random() > chance) return;
+    this.repairDry = 0;
+    const k = this.pickups.get();
+    k.kind = 'repair'; k.val = 0; k.x = k.ox = e.x; k.y = k.oy = e.y; k.vx = rnd(-0.5, 0.5) || 0.3; k.vy = 0; k.t = 0; k.life = 480;
+  }
   dropToken(x: number, y: number, tok: TokenType) {
     const k = this.pickups.get();
     k.kind = 'token'; k.tok = tok; k.val = 0; k.x = k.ox = x; k.y = k.oy = y; k.vx = rnd(-0.6, 0.6) || 0.4; k.vy = 0; k.t = 0; k.life = 750;
@@ -703,6 +727,13 @@ export class World {
       this.earn(k.val);
       audio.play('cash');
       this.fx.floatText(k.x, k.y - 8, '$' + k.val, 'green');
+      return;
+    }
+    if (k.kind === 'repair') {
+      const heal = Math.round(ps.maxShield() * 0.2);
+      ps.shield = Math.min(ps.maxShield(), ps.shield + heal);
+      audio.play('token');
+      this.fx.floatText(p.x, p.y - 22, '+' + heal + ' SHIELD', 'green');
       return;
     }
     audio.play('token');
@@ -1109,6 +1140,7 @@ export class World {
     for (const k of this.pickups.list) {
       const x = k.ox + (k.x - k.ox) * a, y = k.oy + (k.y - k.oy) * a;
       if (k.kind === 'token') g(x, y, 12 + pulse, TOKEN_GLOW[k.tok] ?? '#ffffff', 0.9);
+      else if (k.kind === 'repair') g(x, y, 13 + Math.sin(k.t * 0.15) * 3, '#44ff77', 0.9);
       else if (k.val >= 25) g(x, y, 6, '#88ff66', 0.5);
     }
     const bs = this.boss;
@@ -1184,11 +1216,32 @@ export class World {
     if (k.kind === 'cash') {
       const s = k.val >= 100 ? S.cash100 : k.val >= 50 ? S.cash50 : k.val >= 25 ? S.cash25 : k.val >= 10 ? S.cash10 : S.cash5;
       ctx.drawImage(s, x - (s.width >> 1), y - (s.height >> 1));
+    } else if (k.kind === 'repair') {
+      this.drawRepair(ctx, x, y + Math.sin(k.t * 0.08) * 1.5, k.t);
     } else {
       const fr = SF['tok' + k.tok][(k.t >> 3) % 4];
       ctx.drawImage(fr, x - 9, y - 9);
       if ((k.t >> 3) % 4 === 0 || (k.t >> 3) % 4 === 3) text(ctx, k.tok, x - 2, y - 3, 'white');
     }
+  }
+
+  /** a small glowing repair cell: dark capsule, green cross, rotating sparkle */
+  drawRepair(ctx: Ctx, x: number, y: number, t: number) {
+    ctx.save();
+    const beat = 1 + Math.max(0, Math.sin(t * 0.15)) * 0.12;
+    ctx.translate(x, y); ctx.scale(beat, beat);
+    const rr = (x0: number, y0: number, w: number, h: number, r: number) => { ctx.beginPath(); ctx.roundRect(x0, y0, w, h, r); };
+    ctx.fillStyle = 'rgba(0,0,0,0.45)'; rr(-6, -5, 14, 14, 4); ctx.fill();
+    const body = ctx.createLinearGradient(0, -7, 0, 7);
+    body.addColorStop(0, '#5a6a78'); body.addColorStop(0.5, '#2a3440'); body.addColorStop(1, '#141a22');
+    ctx.fillStyle = body; rr(-7, -7, 14, 14, 4); ctx.fill();
+    ctx.strokeStyle = '#9fffc0'; ctx.lineWidth = 0.75; ctx.stroke();
+    ctx.fillStyle = '#33ff77'; ctx.fillRect(-1.75, -5, 3.5, 10); ctx.fillRect(-5, -1.75, 10, 3.5);
+    ctx.fillStyle = '#ddffe8'; ctx.fillRect(-0.75, -4, 1.5, 8); ctx.fillRect(-4, -0.75, 8, 1.5);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)'; rr(-6, -6, 12, 4, 2); ctx.fill();
+    ctx.restore();
+    const a = t * 0.09, sx = x + Math.cos(a) * 10, sy = y + Math.sin(a) * 10;
+    ctx.fillStyle = '#ccffdd'; ctx.fillRect(sx - 0.5, sy - 2, 1, 4); ctx.fillRect(sx - 2, sy - 0.5, 4, 1);
   }
 
   drawHitboxes(ctx: Ctx) {

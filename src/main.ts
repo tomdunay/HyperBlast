@@ -122,7 +122,7 @@ setTimeout(() => {
   buildSprites();
   buildEnemies();
   buildBossArt();
-  (window as any).__art = { S, SF, ENEMIES, Boss, canvas: () => canvas }; // debug: inspect generated art
+  (window as any).__art = { S, SF, ENEMIES, Boss, game: () => game, canvas: () => canvas }; // debug: inspect generated art
   if (new URLSearchParams(location.search).get('gentest') === '1') { genTest(); return; }
   const game = new Game();
   (window as any).game = game;

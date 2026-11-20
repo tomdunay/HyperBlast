@@ -116,6 +116,11 @@ As threat rises:
 The **THREAT** meter under the hi-score shows five levels. Gorbo radios in when it goes up. The regenerator now only
 repairs after three seconds without damage. When you are underpowered, threat goes negative and enemies ease off.
 
+**Repair cells.** Destroyed enemies sometimes drop a green repair cell that restores 20% of your shield. Drops are
+based on need: nothing drops above 70% shield, and the chance rises as your shield runs low (about one every 30 seconds
+of steady kills at half shield, one every 18 seconds near empty). Only one cell can be on screen, there is an 8-second
+cooldown between drops, elites are three times as likely to drop one, and 30 seconds below 40% shield guarantees the next kill drops one.
+
 ## Game structure
 
 - **15 levels.** Levels 1–5 are hand-authored: Primordial Sea, Fossil Caverns, Overgrown Hive, Biomech Fortress and

@@ -13,7 +13,7 @@ export function flashOf(s: Spr) {
 
 // ---------- shape description used by enemies & bosses ----------
 export type Shape =
-  | { t: 'ell'; x: number; y: number; rx: number; ry: number; r: RampName; bias?: number; z?: number; spec?: boolean }
+  | { t: 'ell'; x: number; y: number; rx: number; ry: number; r: RampName; bias?: number; z?: number; spec?: boolean; glow?: boolean }
   | { t: 'box'; x: number; y: number; w: number; h: number; r: RampName; bevel?: number; bias?: number; z?: number }
   | { t: 'cyl'; x: number; y: number; w: number; h: number; r: RampName; vert?: boolean; z?: number; bias?: number }
   | { t: 'poly'; p: number[]; r: RampName; l?: number; z?: number }
@@ -27,12 +27,18 @@ const ROUGH: Partial<Record<RampName, number>> = { flesh: 0.07, slime: 0.06, gre
 const CHROME = new Set<RampName>(['chrome', 'metal']);
 
 /** Render shapes into a canvas of (w,h); shape coords are relative to the canvas centre. */
-export function renderShapes(w: number, h: number, shapes: Shape[], sym = false): Spr {
+export function renderShapes(w: number, h: number, shapes: Shape[], sym = false, depth = false): Spr {
   const b = new SB(w, h);
   const cx = w / 2, cy = h / 2;
   for (const s of shapes) {
+    // light strips and vent slots made of small eye/cyan boxes emit light too
+    b.glowOn = s.t === 'box' && (s.r === 'eye' || s.r === 'cyan') && s.w * s.h <= 260;
     switch (s.t) {
-      case 'ell': b.ell(cx + s.x, cy + s.y, s.rx, s.ry, RAMPS[s.r], { z: s.z ?? 0, bias: s.bias, spec: s.spec, rough: ROUGH[s.r] ?? 0, chrome: CHROME.has(s.r) && Math.min(s.rx, s.ry) >= 2.5 }); break;
+      case 'ell': b.ell(cx + s.x, cy + s.y, s.rx, s.ry, RAMPS[s.r], {
+        z: s.z ?? 0, bias: s.bias, spec: s.spec, rough: ROUGH[s.r] ?? 0, chrome: CHROME.has(s.r) && Math.min(s.rx, s.ry) >= 2.5,
+        // lamps and small hot cores emit light
+        glow: s.glow ?? (!!s.spec && (s.r === 'eye' || s.r === 'cyan') && Math.min(s.rx, s.ry) <= 10),
+      }); break;
       case 'box': b.box(Math.round(cx + s.x - s.w / 2), Math.round(cy + s.y - s.h / 2), s.w, s.h, RAMPS[s.r], { z: s.z ?? 0, bevel: s.bevel, bias: s.bias }); break;
       case 'cyl': b.cyl(Math.round(cx + s.x - s.w / 2), Math.round(cy + s.y - s.h / 2), s.w, s.h, RAMPS[s.r], s.vert ?? true, s.z ?? 0, s.bias ?? 0); break;
       case 'poly': b.poly(s.p.map((v, i) => v + (i % 2 ? cy : cx)), RAMPS[s.r], s.l ?? 0.6, s.z ?? 0); break;
@@ -74,7 +80,9 @@ export function renderShapes(w: number, h: number, shapes: Shape[], sym = false)
       }
     }
   }
+  b.glowOn = false;
   if (sym) b.mirrorX();
+  if (depth) b.depthShade();
   b.rim();
   b.outline();
   return b.canvas();

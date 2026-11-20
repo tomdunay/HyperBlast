@@ -77,6 +77,45 @@ curvature on top of it.
 
 In the shop, Fire or Enter buys, X or Backspace sells, and Esc leaves.
 
+### Saving and continuing
+
+The run saves automatically:
+
+- at the start of every level and life;
+- at each checkpoint;
+- after the shop;
+- when you close or hide the tab.
+
+To stop mid-run, pause and choose **SAVE AND QUIT**. The title screen then offers **CONTINUE**, which shows your level,
+lives and cash. Continue restarts at the last checkpoint with the same loadout, score, lives, cash, difficulty and
+level seed. **END GAME** on the pause menu ends the run properly, with Hall of Fame entry. Game over and the ending
+also clear the save.
+
+### Threat
+
+The game watches how strong your ship is and pushes back (`game/director.ts`), so a fully kitted Strikeblaster
+still has to work for it. Threat is set by two things:
+
+- **Power gap.** Every weapon level adds to a firepower rating, weighted by how often it really connects. Armour,
+  regeneration and speed count for less. The rating is compared with what a sensible buyer has at that point in the
+  game. Running ahead of that curve raises the threat, and running behind it lowers it.
+- **Form.** A slow rubber band. About 25 seconds without being hit starts to lean on you. Taking hits and losing lives
+  ease off, and this carries over between lives and levels.
+
+As threat rises:
+
+- enemies fire more often, with faster bullets that hit harder;
+- enemies have more HP;
+- enemies gain **flat armour**, which soaks a fixed amount from every hit (never more than 60%). Heavy weapons like the
+  cannon, laser and homing missiles shrug it off, and chip-damage sprays like spread, side shot and twister feel it.
+  That keeps choosing weapons meaningful instead of buying everything;
+- **elite** enemies appear: gilded, glowing, tougher, faster-firing and worth more cash;
+- waves bring mirrored **reinforcements**;
+- bosses get more HP and fire faster.
+
+The **THREAT** meter under the hi-score shows five levels. Gorbo radios in when it goes up. The regenerator now only
+repairs after three seconds without damage. When you are underpowered, threat goes negative and enemies ease off.
+
 ## Game structure
 
 - **15 levels.** Levels 1–5 are hand-authored: Primordial Sea, Fossil Caverns, Overgrown Hive, Biomech Fortress and
@@ -395,7 +434,8 @@ src/
     Player.ts          ship, crush and dive, attachments
     weapons.ts         every weapon, using a shared bullet pool
     enemies.ts         enemy archetypes and movement scripts
-    bosses.ts          boss framework and nine boss designs
+    bosses.ts          boss framework, boss designs, procedural armour and glow detail
+    director.ts        threat director: power rating, adaptive difficulty, elites
     Scroller.ts        tilemap rendering, collision mask, parallax
     Shop.ts            Gorbo's Trade Hut
     items.ts           catalogue, prices, player state

@@ -9,7 +9,7 @@ export type RGB = [number, number, number];
 /** Art resolution multiplier (real pixels per logical pixel). */
 export const RES = 2;
 
-export type HiCanvas = HTMLCanvasElement & { _r?: number; _rw?: number; _rh?: number };
+export type HiCanvas = HTMLCanvasElement & { _r?: number; _rw?: number; _rh?: number; _glow?: HTMLCanvasElement };
 
 // --- drawImage patch: hi-res canvases draw at their logical size; 9-arg source rects are in logical pixels ---
 {
@@ -153,6 +153,9 @@ export class SB {
   /** real (buffer) size and scale */
   W: number; H: number; r: number;
   data: Uint32Array; z: Float32Array;
+  /** per-pixel emissive flag (set by shapes drawn while glowOn is true) */
+  gm: Uint8Array | null = null;
+  glowOn = false;
   constructor(w: number, h: number, r = RES) {
     this.w = w; this.h = h; this.r = r;
     this.W = Math.ceil(w * r); this.H = Math.ceil(h * r);
@@ -168,6 +171,8 @@ export class SB {
     if (z < this.z[i]) return;
     this.z[i] = z;
     this.data[i] = SB.pack(c);
+    if (this.glowOn) (this.gm ??= new Uint8Array(this.W * this.H))[i] = 1;
+    else if (this.gm) this.gm[i] = 0;
   }
   /** write one logical pixel (an r×r block) */
   px(x: number, y: number, c: RGB, z = 0) {
@@ -191,8 +196,10 @@ export class SB {
     return r[Math.max(0, Math.min(r.length - 1, Math.round(t)))];
   }
   /** Sphere-shaded ellipse. light: brightness bias. */
-  ell(cx: number, cy: number, rx: number, ry: number, r: RGB[], o: { z?: number; bias?: number; spec?: boolean; flat?: boolean; rough?: number; chrome?: boolean } = {}) {
+  ell(cx: number, cy: number, rx: number, ry: number, r: RGB[], o: { z?: number; bias?: number; spec?: boolean; flat?: boolean; rough?: number; chrome?: boolean; glow?: boolean } = {}) {
     const z0 = o.z ?? 0, bias = o.bias ?? 0, rough = o.rough ?? 0, seed = (cx * 7.3 + cy * 3.1) | 0;
+    const prevGlow = this.glowOn;
+    if (o.glow) this.glowOn = true;
     this.each((x, y, X, Y) => {
       const nx = (x + 0.5 - cx) / rx, ny = (y + 0.5 - cy) / ry;
       const d = nx * nx + ny * ny;
@@ -209,6 +216,7 @@ export class SB {
       if (rough) l += (fbm(x * 0.9, y * 0.9, seed, 2) - 0.5) * rough * 2 + (noise2(x * 2.2, y * 2.2, seed + 5) - 0.5) * rough;
       this.pxR(X, Y, this.shadeCol(r, Math.min(1, l + bias), X, Y, 0.6), z0 + nz * Math.min(rx, ry));
     }, cx - rx - 1, cy - ry - 1, cx + rx + 1, cy + ry + 1);
+    this.glowOn = prevGlow;
   }
   /** Bevelled box / panel. */
   box(x0: number, y0: number, w: number, h: number, r: RGB[], o: { z?: number; bevel?: number; bias?: number } = {}) {
@@ -264,7 +272,7 @@ export class SB {
   eye(cx: number, cy: number, r: number, lx = 0, ly = 0.3, iris: RGB[] = RAMPS.eye, z = 20) {
     this.ell(cx, cy, r, r, RAMPS.bone, { z, bias: 0.15 });
     const ir = Math.max(1.5, r * 0.55);
-    this.ell(cx + lx * r * 0.35, cy + ly * r * 0.35, ir, ir, iris, { z: z + r, flat: false });
+    this.ell(cx + lx * r * 0.35, cy + ly * r * 0.35, ir, ir, iris, { z: z + r, flat: false, glow: true });
     const pr = Math.max(1, ir * 0.45);
     this.ell(cx + lx * r * 0.45, cy + ly * r * 0.45, pr, pr, RAMPS.dark, { z: z + r + 2, flat: true, bias: -0.5 });
     this.ell(cx - r * 0.3, cy - r * 0.35, Math.max(0.5, r * 0.16), Math.max(0.5, r * 0.16), [[255, 255, 255]], { z: z + r + 5, flat: true });
@@ -309,7 +317,47 @@ export class SB {
       for (let x = 0; x < this.W >> 1; x++) {
         const a = y * this.W + x, b = y * this.W + (this.W - 1 - x);
         this.data[b] = this.data[a];
+        this.z[b] = this.z[a];
+        if (this.gm) this.gm[b] = this.gm[a];
       }
+    return this;
+  }
+  /**
+   * Depth lighting from the z-buffer: shapes that stand proud of what is behind them cast soft shadows down-right
+   * (light from the upper left), and crevices between overlapping shapes get ambient occlusion. Turns a stack of
+   * flat-lit primitives into one solid, sculpted object.
+   */
+  depthShade(strength = 1) {
+    const W = this.W, H = this.H, r = this.r, z = this.z, src = this.data.slice();
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, p = src[i];
+      if (!p) continue;
+      const z0 = z[i];
+      // cast shadow: march towards the light
+      let sh = 0;
+      for (let k = 1; k <= 6; k++) {
+        const xx = x - Math.round(k * r * 0.9), yy = y - Math.round(k * r * 1.1);
+        if (xx < 0 || yy < 0) break;
+        const j = yy * W + xx;
+        if (!src[j]) continue;
+        const dz = z[j] - z0 - k * 0.7;
+        if (dz > 0.4) sh = Math.max(sh, Math.min(1, dz / 5) * (1 - k / 8));
+      }
+      // ambient occlusion: how much higher stuff surrounds this pixel
+      let ao = 0;
+      for (const [dx, dy] of dirs) for (const rad of [1.5, 3.5]) {
+        const xx = Math.round(x + dx * rad * r), yy = Math.round(y + dy * rad * r);
+        if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+        const j = yy * W + xx;
+        if (src[j] && z[j] > z0 + 1.2) ao += Math.min(1, (z[j] - z0) / 8);
+      }
+      ao /= 16;
+      const f = 1 - Math.min(0.62, (sh * 0.5 + ao * 0.7) * strength);
+      if (f >= 0.999) continue;
+      const rr = (p & 255) * f, gg = ((p >> 8) & 255) * f, bb = ((p >> 16) & 255) * (f * 0.9 + 0.1);
+      this.data[i] = ((255 << 24) | ((bb & 255) << 16) | ((gg & 255) << 8) | (rr & 255)) >>> 0;
+    }
     return this;
   }
   canvas(): HiCanvas {
@@ -319,7 +367,19 @@ export class SB {
     const img = ctx.createImageData(this.W, this.H);
     new Uint32Array(img.data.buffer).set(this.data);
     ctx.putImageData(img, 0, 0);
-    return markHi(c, this.r);
+    const out = markHi(c, this.r);
+    if (this.gm) {
+      // emissive layer: just the glowing pixels, for additive glow passes
+      const g = document.createElement('canvas');
+      g.width = this.W; g.height = this.H;
+      const gx = g.getContext('2d')!;
+      const gi = gx.createImageData(this.W, this.H);
+      const gd = new Uint32Array(gi.data.buffer);
+      let any = false;
+      for (let i = 0; i < this.gm.length; i++) if (this.gm[i] && this.data[i]) { gd[i] = this.data[i]; any = true; }
+      if (any) { gx.putImageData(gi, 0, 0); out._glow = markHi(g, this.r); }
+    }
+    return out;
   }
 }
 
@@ -370,6 +430,7 @@ export function cracked(src: HTMLCanvasElement, seed = 3): HTMLCanvasElement {
   }
   ctx.fillStyle = 'rgba(40,0,0,0.25)';
   ctx.fillRect(0, 0, c.width, c.height);
+  c._glow = (src as HiCanvas)._glow;
   return c;
 }
 
@@ -407,6 +468,8 @@ export function recolor(src: HTMLCanvasElement, hue: number, sat = 1, lig = 1): 
     for (let k = 0; k < 3; k++) d[i + k] = Math.round(out[k] * 255);
   }
   ctx.putImageData(img, 0, 0);
+  const g = (src as HiCanvas)._glow;
+  if (g) c._glow = recolor(g, hue, sat, lig) as HiCanvas;
   m.set(key, c);
   return c;
 }

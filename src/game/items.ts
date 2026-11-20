@@ -67,6 +67,8 @@ export class PlayerState {
   shield = 100;
   load: Loadout = emptyLoadout();
   extraLifeAt = 50000;
+  /** threat director's rubber band from recent form (see director.ts) */
+  form = 0;
   /** stats for the current level; survive deaths, reset when the level changes */
   lvStats = { kills: 0, cashEarned: 0, grazes: 0, maxCombo: 0 };
   constructor(id: number) { this.id = id; }

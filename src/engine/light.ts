@@ -69,6 +69,33 @@ export function shadowOf(src: HTMLCanvasElement): HTMLCanvasElement {
   return c;
 }
 
+const emissiveCache = new WeakMap<HTMLCanvasElement, { c: HTMLCanvasElement; pad: number } | null>();
+/**
+ * Glow map of a sprite's light-emitting pixels (bright, saturated: eyes, cores, lamps, vents), blurred so it can be
+ * drawn additively over the sprite. Returns null when nothing glows. Draw at (x - pad, y - pad).
+ */
+export function emissiveOf(src: HTMLCanvasElement): { c: HTMLCanvasElement; pad: number } | null {
+  if (emissiveCache.has(src)) return emissiveCache.get(src)!;
+  // the sprite builder records which pixels belong to light-emitting shapes (lamps, irises, small hot cores)
+  const m = (src as HTMLCanvasElement & { _glow?: HTMLCanvasElement })._glow;
+  let out: { c: HTMLCanvasElement; pad: number } | null = null;
+  if (m) {
+    const [W, H] = realSize(src);
+    const pad = 8;
+    const [c, cx] = hiCanvas(src.width + pad * 2, src.height + pad * 2);
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.filter = `blur(${RES * 2.2}px)`;
+    cx.drawImage(m, pad * RES, pad * RES, W, H);
+    cx.drawImage(m, pad * RES, pad * RES, W, H);
+    cx.filter = 'none';
+    cx.globalAlpha = 0.8;
+    cx.drawImage(m, pad * RES, pad * RES, W, H);
+    out = { c, pad };
+  }
+  emissiveCache.set(src, out);
+  return out;
+}
+
 const vigs = new Map<number, HTMLCanvasElement>();
 /** Red edge vignette for damage pulses, sized to the current view width (draw at x = -VIEW.ox). */
 export function vignette(): HTMLCanvasElement {

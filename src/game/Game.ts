@@ -15,7 +15,7 @@ import { Scroller } from './Scroller';
 import { Shop } from './Shop';
 import { PlayerState } from './items';
 import { comboRank, gameOverLine, levelQuip, pauseLine, statsLine, titleTag } from './sauce';
-import { Settings, loadSettings, saveSettings, loadHi, qualifies, insertHi } from './save';
+import { Settings, loadSettings, saveSettings, loadHi, qualifies, insertHi, saveRun, loadRun, clearRun, RunSave } from './save';
 
 interface Scene { update(): void; render(ctx: Ctx, a: number): void }
 
@@ -102,6 +102,7 @@ export class Game {
     this.t++;
     if (this.fadeT > 0) this.fadeT--;
     this.scene.update();
+    this.autosave();
     // build the next level's scenery a slice at a time while menus, cards and the shop are on screen
     if (this.prefetch && !(this.scene instanceof PlayScene) && Scroller.prepare(this.prefetch, this.scene instanceof IntroScene ? 15 : 10)) {
       this.prefetch = null;
@@ -124,6 +125,7 @@ export class Game {
   toTitle() { this.world = null; this.scene = new TitleScene(this); }
 
   startGame() {
+    clearRun();
     const n = this.settings.players;
     this.players = [];
     for (let i = 0; i < n; i++) {
@@ -152,6 +154,7 @@ export class Game {
   beginLevel() {
     const ps = this.ps;
     ps.shield = Math.max(ps.shield, 1);
+    this.saveRun();
     this.world = new World(this.getLevel(ps.level), ps, this.makeHost(false));
     this.scene = new PlayScene(this, this.world);
   }
@@ -175,7 +178,7 @@ export class Game {
   onShop() {
     const w = this.world!;
     const ps = this.ps;
-    this.scene = new ShopScene(new Shop(ps, ps.level * 2, false, () => { w.resumeFromShop(); this.scene = new PlayScene(this, w); }));
+    this.scene = new ShopScene(new Shop(ps, ps.level * 2, false, () => { this.saveRun(); w.resumeFromShop(); this.scene = new PlayScene(this, w); }));
   }
 
   onLevelDone() {
@@ -187,14 +190,57 @@ export class Game {
       this.scene = new ShopScene(new Shop(ps, ps.level * 2 + 1, true, () => {
         ps.level++; ps.checkpoint = 0; ps.midDone = false;
         ps.lvStats = { kills: 0, cashEarned: 0, grazes: 0, maxCombo: 0 };
+        this.saveRun();
         this.intro(true);
       }));
     });
   }
 
   gameOver() {
+    clearRun();
     this.world = null;
     this.scene = new GameOverScene(this);
+  }
+
+  // ------------------------------------------------------------ save / continue
+  /** key of the last saved progress point, so checkpoints only write once */
+  private savedAt = '';
+  /** Save the run so it can be continued from the start of the current checkpoint. */
+  saveRun() {
+    if (!this.players.length || this.regenOffset) return;
+    const s = this.settings;
+    const r: RunSave = {
+      v: 1, at: Date.now(), cur: this.cur, difficulty: s.difficulty, levelMode: s.levelMode, seed: s.seed, regenOffset: 0,
+      players: this.players.map((p) => ({ ...p, load: { ...p.load }, lvStats: { ...p.lvStats } })),
+    };
+    saveRun(r);
+    this.savedAt = this.players.map((p) => p.level + ':' + p.checkpoint).join(',');
+  }
+  /** Resume a saved run: same levels (mode + seed), same loadouts, from the saved checkpoint. */
+  continueRun() {
+    const r = loadRun();
+    if (!r) return;
+    const s = this.settings;
+    s.difficulty = r.difficulty; s.levelMode = r.levelMode; s.seed = r.seed; s.players = r.players.length === 2 ? 2 : 1;
+    this.applySettings();
+    this.regenOffset = 0;
+    this.players = r.players.map((d, i) => {
+      const ps = new PlayerState(i + 1);
+      Object.assign(ps, d, { load: { ...ps.load, ...(d.load as object) }, lvStats: { ...ps.lvStats, ...(d.lvStats as object) } });
+      return ps;
+    });
+    this.cur = Math.min(r.cur, this.players.length - 1);
+    this.intro(true);
+  }
+  /** called when the page is closed or hidden: keep the run if one is in progress */
+  saveIfPlaying() {
+    if (this.scene instanceof PlayScene || this.scene instanceof ShopScene || this.scene instanceof IntroScene) this.saveRun();
+  }
+  /** autosave when a new checkpoint is reached */
+  autosave() {
+    if (!(this.scene instanceof PlayScene) || !this.world || this.world.state !== 'play') return;
+    const key = this.players.map((p) => p.level + ':' + p.checkpoint).join(',');
+    if (key !== this.savedAt) this.saveRun();
   }
 
   /** run name entry for every player that qualifies, then go to title */
@@ -306,10 +352,13 @@ export function drawHiTable(ctx: Ctx, y0: number, highlight = -1) {
 class TitleScene implements Scene {
   g: Game; t = 0; sel = 0; idle = 0; phase: 'menu' | 'scores' | 'demo' = 'menu';
   demo: World | null = null;
-  items = ['START GAME', 'OPTIONS', 'HALL OF FAME'];
+  items: string[];
+  save: RunSave | null;
   demoLv: { lv: LevelDef; idx: number };
   constructor(g: Game) {
     this.g = g; audio.playMusic('title');
+    this.save = loadRun();
+    this.items = this.save ? ['CONTINUE', 'NEW GAME', 'OPTIONS', 'HALL OF FAME'] : ['START GAME', 'OPTIONS', 'HALL OF FAME'];
     this.demoLv = this.pickDemo();
   }
   /** every attract loop shows a freshly generated level from a random seed; pre-build it while the menu idles */
@@ -333,7 +382,7 @@ class TitleScene implements Scene {
     }
     if (input.p('up')) { this.sel = (this.sel + this.items.length - 1) % this.items.length; audio.play('menu'); }
     if (input.p('down')) { this.sel = (this.sel + 1) % this.items.length; audio.play('menu'); }
-    for (const c of input.clicks) { const i = Math.floor((c.y - 142) / 14); if (i >= 0 && i < this.items.length) { this.sel = i; this.choose(); return; } }
+    for (const c of input.clicks) { const i = Math.floor((c.y - 143) / 12); if (i >= 0 && i < this.items.length) { this.sel = i; this.choose(); return; } }
     if (input.p('confirm') || input.p('fire')) this.choose();
     if (this.idle > 500) { this.phase = 'scores'; this.idle = 0; }
   }
@@ -345,9 +394,12 @@ class TitleScene implements Scene {
   }
   choose() {
     audio.play('select');
-    if (this.sel === 0) this.g.startGame();
-    if (this.sel === 1) this.g.scene = new OptionsScene(this.g);
-    if (this.sel === 2) { this.phase = 'scores'; this.idle = 0; }
+    switch (this.items[this.sel]) {
+      case 'CONTINUE': this.g.continueRun(); break;
+      case 'START GAME': case 'NEW GAME': this.g.startGame(); break;
+      case 'OPTIONS': this.g.scene = new OptionsScene(this.g); break;
+      case 'HALL OF FAME': this.phase = 'scores'; this.idle = 0; break;
+    }
   }
   render(ctx: Ctx, a: number) {
     if (this.phase === 'demo' && this.demo) {
@@ -390,9 +442,13 @@ class TitleScene implements Scene {
     ctx.globalCompositeOperation = 'source-over';
     this.items.forEach((it, i) => {
       const s = i === this.sel;
-      text(ctx, (s ? '> ' : '  ') + it + (s ? ' <' : '  '), 160, 142 + i * 14, s ? 'gold' : 'metal', 1, 0.5);
+      text(ctx, (s ? '> ' : '  ') + it + (s ? ' <' : '  '), 160, 143 + i * 12, s ? 'gold' : 'metal', 1, 0.5);
     });
-    text(ctx, 'HI ' + String(this.g.hiScore()).padStart(7, '0'), 160, 190, 'metal', 1, 0.5);
+    if (this.save && this.items[this.sel] === 'CONTINUE') {
+      const p = this.save.players[this.save.cur] as { level: number; checkpoint: number; score: number; lives: number; cash: number };
+      const mode = this.save.levelMode === 'random' ? '  RANDOMISER' : '';
+      text(ctx, `LEVEL ${p.level + 1}-${p.checkpoint + 1}  LIVES ${p.lives}  $${p.cash}${mode}`, 160, 190, 'cyan', 1, 0.5);
+    } else text(ctx, 'HI ' + String(this.g.hiScore()).padStart(7, '0'), 160, 190, 'metal', 1, 0.5);
     const diff = ['EASY', 'NORMAL', 'HARD'][this.g.settings.difficulty];
     const mode = this.g.settings.levelMode === 'random' ? 'RANDOMISER ' + this.g.seedLabel() : 'CLASSIC';
     text(ctx, `${this.g.settings.players}P  ${diff}  ${mode}`, 160, 202, 'grey', 1, 0.5);
@@ -568,11 +624,13 @@ class PlayScene implements Scene {
   update() {
     if (input.p('pause') && !this.paused) { this.paused = true; this.psel = 0; this.quip = pauseLine(); audio.play('menu'); return; }
     if (this.paused) {
-      if (input.p('up') || input.p('down')) { this.psel ^= 1; audio.play('menu'); }
+      if (input.p('up')) { this.psel = (this.psel + 2) % 3; audio.play('menu'); }
+      if (input.p('down')) { this.psel = (this.psel + 1) % 3; audio.play('menu'); }
       if (input.p('pause') || input.p('back')) this.paused = false;
       else if (input.p('confirm') || input.p('fire')) {
         if (this.psel === 0) this.paused = false;
-        else { audio.stopMusic(); this.g.hiScoreEntries(); }
+        else if (this.psel === 1) { audio.stopMusic(); this.g.saveRun(); this.g.toTitle(); }
+        else { audio.stopMusic(); clearRun(); this.g.hiScoreEntries(); }
       }
       return;
     }
@@ -584,8 +642,10 @@ class PlayScene implements Scene {
       fillView(ctx, 'rgba(0,0,0,0.6)');
       text(ctx, 'PAUSED', 160, 90, 'gold', 2, 0.5);
       text(ctx, (this.psel === 0 ? '> ' : '  ') + 'RESUME', 160, 124, this.psel === 0 ? 'gold' : 'metal', 1, 0.5);
-      text(ctx, (this.psel === 1 ? '> ' : '  ') + 'QUIT TO TITLE', 160, 138, this.psel === 1 ? 'gold' : 'metal', 1, 0.5);
-      wrap(this.quip, 40).forEach((l, i) => text(ctx, l, 160, 168 + i * 10, 'purple', 1, 0.5));
+      text(ctx, (this.psel === 1 ? '> ' : '  ') + 'SAVE AND QUIT', 160, 138, this.psel === 1 ? 'gold' : 'metal', 1, 0.5);
+      text(ctx, (this.psel === 2 ? '> ' : '  ') + 'END GAME', 160, 152, this.psel === 2 ? 'gold' : 'metal', 1, 0.5);
+      if (this.psel === 1) text(ctx, 'CONTINUE FROM THE LAST CHECKPOINT ON THE TITLE SCREEN', 160, 108, 'cyan', 1, 0.5);
+      wrap(this.quip, 40).forEach((l, i) => text(ctx, l, 160, 176 + i * 10, 'purple', 1, 0.5));
     }
   }
 }
@@ -688,6 +748,7 @@ class StatsScene implements Scene {
 class EndingScene implements Scene {
   t = 0; shop: Shop;
   constructor(private g: Game) {
+    clearRun();
     this.shop = new Shop(g.ps, 99, true, () => {});
     audio.playMusic('ending');
   }

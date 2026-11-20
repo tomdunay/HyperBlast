@@ -8,6 +8,10 @@ export interface Enemy {
   hp: number; t: number; world: boolean; flash: number; pat: string; p: Record<string, number>;
   spawnIdx: number; fireT: number; x0: number; y0: number; trail: { x: number; y: number }[]; token?: string;
   state: number; dir: number; segHp?: number;
+  /** threat director: tougher, faster-firing, better-paying variant */
+  elite?: boolean;
+  /** flat damage soaked per hit */
+  armor?: number;
 }
 
 export interface FireDef { every: number; kind: 'aim' | 'down' | 'spread3' | 'spread5' | 'ring' | 'aim3'; speed: number; bullet?: string; delay?: number; telegraph?: number }

@@ -3,7 +3,7 @@ import { input } from './engine/input';
 import { audio } from './engine/audio';
 import { buildSprites, S, SF } from './art/sprites';
 import { buildEnemies, ENEMIES } from './game/enemies';
-import { buildBossArt } from './game/bosses';
+import { buildBossArt, Boss } from './game/bosses';
 import { Game } from './game/Game';
 import { text } from './engine/font';
 import { Presenter } from './engine/post';
@@ -122,10 +122,13 @@ setTimeout(() => {
   buildSprites();
   buildEnemies();
   buildBossArt();
-  (window as any).__art = { S, SF, ENEMIES, canvas: () => canvas }; // debug: inspect generated art
+  (window as any).__art = { S, SF, ENEMIES, Boss, canvas: () => canvas }; // debug: inspect generated art
   if (new URLSearchParams(location.search).get('gentest') === '1') { genTest(); return; }
   const game = new Game();
   (window as any).game = game;
+  // closing the tab mid-run keeps your progress for CONTINUE
+  window.addEventListener('pagehide', () => game.saveIfPlaying());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) game.saveIfPlaying(); });
   resize(); // apply the saved screen mode
   // test hook: advance the simulation synchronously (works even when the tab is hidden)
   (window as any).step = (n: number) => { for (let i = 0; i < n; i++) { input.poll(); game.update(); } prep(); game.render(ctx, 1); present(); };

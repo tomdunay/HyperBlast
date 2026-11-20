@@ -65,3 +65,29 @@ export function insertHi(e: HiScore) {
   h.sort((a, b) => b.score - a.score);
   saveHi(h.slice(0, 10));
 }
+
+// ---------------------------------------------------------------- run save (Continue)
+/** Everything needed to resume a run at the start of the current checkpoint. */
+export interface RunSave {
+  v: 1;
+  at: number;
+  cur: number;
+  difficulty: 0 | 1 | 2;
+  levelMode: 'classic' | 'random';
+  seed: number;
+  regenOffset: number;
+  players: Record<string, unknown>[];
+}
+const KEY_R = 'hyperblast.run';
+export function saveRun(r: RunSave) {
+  try { localStorage.setItem(KEY_R, JSON.stringify(r)); } catch { /* ignore */ }
+}
+export function loadRun(): RunSave | null {
+  try {
+    const r = JSON.parse(localStorage.getItem(KEY_R) || 'null');
+    return r && r.v === 1 && Array.isArray(r.players) && r.players.length ? r : null;
+  } catch { return null; }
+}
+export function clearRun() {
+  try { localStorage.removeItem(KEY_R); } catch { /* ignore */ }
+}

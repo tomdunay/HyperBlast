@@ -16,6 +16,8 @@ import { PBullet, updateWeapons, moveBullet } from './weapons';
 import { LevelDef, SpawnDef, W, H } from './types';
 import { VIEW, MARGIN, fillView } from '../engine/view';
 import { postFx } from '../engine/post';
+import { Director, threatLine } from './director';
+import { tinted } from '../engine/gfx';
 import {
   SAUCE_HEAT, SAUCE_MAX, SAUCE_SAVE_AT, bankTip, bossIntro, checkpointLine, comboBreakLine, comboLine, comboWord,
   deathBig, deathLine, defusedLine, diveLine, extraLifeLine, fillTip, grazeLine, grazePop, idleLine, lowShieldLine,
@@ -32,6 +34,14 @@ interface Pickup { alive: boolean; kind: 'cash' | 'token'; val: number; tok: Tok
 
 const BULLET_DMG: Record<string, number> = { eOrb: 9, eBig: 16, eNeedle: 8, eSpore: 8, ePlasma: 11 };
 const TOKEN_GLOW: Record<string, string> = { P: '#ff4433', S: '#33ccff', H: '#44ff44', $: '#ffcc22', Z: '#cc55ff', D: '#3366ff', X: '#ffffff', '1': '#ff9922' };
+
+const eliteCache = new WeakMap<Spr, Spr>();
+/** gilded variant of an enemy sprite for elites */
+function eliteOf(s: Spr): Spr {
+  let e = eliteCache.get(s);
+  if (!e) { e = tinted(s, '#ffc030', 0.38); eliteCache.set(s, e); }
+  return e;
+}
 
 const ambCache = new Map<string, HTMLCanvasElement>();
 /** colour string (#rgb hex, rgb() or rgba()) with a new alpha */
@@ -111,6 +121,9 @@ export class World {
   hurtT = 0;
   dispCash = -1;
   fireMul: number; bulletMul: number; dmgMul: number;
+  /** difficulty-setting multipliers, before the threat director */
+  private baseFire: number; private baseBullet: number; private baseDmg: number;
+  dir: Director;
   showHit = false; invincible = false; showMap = false;
   // combo system
   combo = 0;
@@ -141,9 +154,11 @@ export class World {
     this.lv = lv; this.ps = ps; this.host = host;
     this.sc = new Scroller(lv);
     this.player = new Player(ps);
-    this.fireMul = [1.5, 1, 0.72][host.diff];
-    this.bulletMul = [0.8, 1, 1.18][host.diff] * (1 + 0.015 * lv.idx);
-    this.dmgMul = [0.6, 1, 1.35][host.diff];
+    this.baseFire = this.fireMul = [1.5, 1, 0.72][host.diff];
+    this.baseBullet = this.bulletMul = [0.8, 1, 1.18][host.diff] * (1 + 0.015 * lv.idx);
+    this.baseDmg = this.dmgMul = [0.6, 1, 1.35][host.diff];
+    this.dir = new Director(lv.idx, ps);
+    this.applyThreat();
     this.spawnState = new Uint8Array(lv.spawns.length);
     const start = lv.checkpoints[Math.min(ps.checkpoint, lv.checkpoints.length - 1)];
     this.sc.y = this.sc.oy = this.sc.maxY = start;
@@ -177,6 +192,13 @@ export class World {
     this.chatter = s;
     this.chatterT = Math.min(170, 70 + s.length);
     this.chatterCd = force ? 40 : 100;
+  }
+  /** fold the threat director's multipliers into the live difficulty values */
+  applyThreat() {
+    const d = this.dir;
+    this.fireMul = this.baseFire * d.fire;
+    this.bulletMul = this.baseBullet * d.bullet;
+    this.dmgMul = this.baseDmg * d.dmg;
   }
   heatDmg(n: number) { return this.sauceBurst > 0 ? n * SAUCE_HEAT : n; }
   addSauce(n: number) {
@@ -265,7 +287,10 @@ export class World {
       updateWeapons(this, p, this.ctl);
       if (this.ctl.zap && this.ps.load.zapper > 0 && !p.dead) this.zap();
       if (this.ctl.dive && this.ps.load.dive > 0 && p.dive === 0 && !p.dead) { this.ps.load.dive--; p.dive = 200; audio.play('dive'); this.radio(diveLine()); }
-      if (this.ps.load.regen && this.t % (60 / this.ps.load.regen | 0) === 0) this.ps.shield = Math.min(this.ps.maxShield(), this.ps.shield + 1);
+      // regenerator only works once you've stayed out of trouble for 3 seconds: it rewards clean play, not face-tanking
+      if (this.ps.load.regen && this.dir.calm > 150 && this.t % (60 / this.ps.load.regen | 0) === 0) this.ps.shield = Math.min(this.ps.maxShield(), this.ps.shield + 1);
+      if (this.dir.tick() && !this.host.demo && this.state === 'play') { this.radio(threatLine(), true); this.say('THREAT UP', 70, 'red'); audio.play('warn'); }
+      this.applyThreat();
     }
     // ---- entities ----
     this.updatePlayerBullets();
@@ -409,12 +434,24 @@ export class World {
     if (pat === 'rise') y = H + 14;
     if (p.alt) p.dir = (k % 2 ? -1 : 1) * (p.dir ?? 1);
     this.spawnEnemy(sp.type, x, y, pat, p, false);
+    // reinforcements: a mirrored wingman joins the wave
+    if (Math.random() < this.dir.reinforce && this.enemies.list.length < 36) {
+      const q = { ...p };
+      let mx = W - x;
+      if (pat === 'side') { q.dir = -(p.dir ?? 1); mx = x < 0 ? W + 14 : -14; }
+      else if (Math.abs(mx - x) < 28) mx = x + (x < 160 ? 28 : -28);
+      this.spawnEnemy(sp.type, mx, y, pat, q, false);
+    }
   }
   spawnEnemy(type: string, x: number, y: number, pat: string, p: Record<string, number>, world: boolean): Enemy {
     const def = ENEMIES[type];
     const e = this.enemies.get();
     e.def = def; e.x = e.ox = e.x0 = x; e.y = e.oy = e.y0 = y; e.vx = 0; e.vy = 0;
-    e.hp = def.hp * (this.host.diff === 2 ? 1.25 : 1) * (1 + 0.04 * this.lv.idx); e.t = 0; e.world = world || !!def.world; e.flash = 0; e.pat = pat; e.p = p;
+    e.hp = def.hp * (this.host.diff === 2 ? 1.25 : 1) * (1 + 0.04 * this.lv.idx) * this.dir.hp; e.t = 0;
+    // elites: only free-flying enemies that are worth fighting (not capsules, wall growths, worms or swarm spawn)
+    e.elite = !world && !def.world && !def.segs && def.name !== 'capsule' && def.name !== 'gate' && def.hp >= 2 && Math.random() < this.dir.elite;
+    if (e.elite) e.hp *= 1.8;
+    e.armor = this.dir.armour + (e.elite ? 0.9 : 0); e.world = world || !!def.world; e.flash = 0; e.pat = pat; e.p = p;
     e.spawnIdx = -1; e.fireT = Math.floor(Math.random() * 40); e.state = 0; e.dir = p.dir ?? 1; e.token = undefined;
     if (def.segs) makeTrail(e);
     return e;
@@ -524,7 +561,7 @@ export class World {
       // laser gates: emitters fire a beam across when paired
       if (e.def.fire && e.y > 4 && e.y < H - 50 && !p.dead) {
         e.fireT++;
-        const every = e.def.fire.every * this.fireMul;
+        const every = e.def.fire.every * this.fireMul * (e.elite ? 0.62 : 1);
         if (e.fireT >= every && e.t > (e.def.fire.delay ?? 20)) { e.fireT = 0; this.enemyFire(e); }
       }
       // remove when off-screen
@@ -553,6 +590,8 @@ export class World {
 
   damageEnemy(e: Enemy, dmg: number): boolean {
     if (!e.alive) return false;
+    // armour blunts every hit by a flat amount, but never below 40%: heavy weapons shrug it off, spray weapons don't
+    if (e.armor) dmg = Math.max(dmg * 0.4, dmg - e.armor);
     e.hp -= dmg;
     e.flash = 2;
     if (e.hp > 0) { audio.play(e.def.armored ? 'ping' : 'hit', 0.5); return false; }
@@ -574,7 +613,8 @@ export class World {
     }
     this.addSauce(1);
     this.addScore(d.score);
-    if (!d.noCash) this.dropCash(e.x, e.y, d.cash, d.expl === 2 ? 6 : 4);
+    if (!d.noCash) this.dropCash(e.x, e.y, d.cash * (e.elite ? 2.5 : 1), d.expl === 2 ? 6 : 4);
+    if (e.elite) { this.addScore(d.score * 2); this.fx.floatText(e.x, e.y - 10, 'ELITE', 'gold'); this.fx.ring(e.x, e.y, e.world); }
     if (e.token) this.dropToken(e.x, e.y, e.token as TokenType);
     if (d.name === 'sporepod') for (let i = 0; i < 4; i++) this.spawnEnemy('spore', e.x, e.y, 'chase', { s: 0.8, life: 300 }, false);
     if (d.splitInto) for (let i = 0; i < d.splitInto.n; i++) {
@@ -710,6 +750,7 @@ export class World {
     if (!this.playerVulnerable()) return;
     const ps = this.ps;
     const hit = amount * this.dmgMul;
+    this.dir.onHurt(hit);
     if (ps.shield - hit <= 0) { if (!this.trySauceSave()) this.killPlayer(); return; }
     ps.shield -= hit;
     if (this.sauceBurst <= 0) this.sauce = Math.max(0, this.sauce - 16);
@@ -729,6 +770,7 @@ export class World {
     const p = this.player;
     if (p.dead) return;
     p.dead = true;
+    this.dir.onDeath();
     this.state = 'dying'; this.stateT = 0;
     this.sauceBurst = 0;
     this.say(deathBig(), 120, 'red');
@@ -794,7 +836,7 @@ export class World {
     const lv = this.lv;
     const mid = !!(lv.midBoss && !this.ps.midDone);
     const key = mid ? lv.midBoss!.boss : lv.endBoss.boss;
-    this.boss = new Boss(key, [0.7, 1, 1.35][this.host.diff]);
+    this.boss = new Boss(key, [0.7, 1, 1.35][this.host.diff] * this.dir.bossHp);
     this.bossKind = mid ? 'mid' : 'end';
     this.bossIntroT = 180;
     this.bossQuip = bossIntro(this.boss.def.name);
@@ -1043,6 +1085,11 @@ export class World {
       }
     }
     const pulse = (this.t >> 2) & 1;
+    for (const e of this.enemies.list) {
+      if (!e.elite || !e.alive) continue;
+      const x = e.ox + (e.x - e.ox) * a, y = e.oy + (e.y - e.oy) * a;
+      g(x, y, Math.max(e.def.w, e.def.h) * 0.75 + Math.sin(this.t * 0.2) * 2, '#ffaa22', 0.55);
+    }
     for (const b of this.eb.list) {
       const x = b.ox + (b.x - b.ox) * a, y = b.oy + (b.y - b.oy) * a;
       const c = b.spr === S.eSpore ? '#55ff33' : b.spr === S.ePlasma ? '#cc44ff' : b.spr === S.eBig ? '#ffaa22' : '#ff3322';
@@ -1108,6 +1155,7 @@ export class World {
       }
     }
     let spr = d.frames[d.anim ? Math.floor(e.t / d.anim) % d.frames.length : 0];
+    if (e.elite) spr = eliteOf(spr);
     if (e.flash) spr = flashOf(spr);
     if (d.face) {
       const vx = e.x - e.ox, vy = (e.y - e.oy);
@@ -1166,6 +1214,7 @@ export class World {
     const pre = this.host.twoPlayer ? ps.id + 'UP ' : '';
     text(ctx, pre + String(ps.score).padStart(7, '0'), 4, 3, 'gold');
     text(ctx, 'HI ' + String(Math.max(this.host.hiScore(), ps.score)).padStart(7, '0'), 316, 3, 'metal', 1, 1);
+    if (!this.host.demo) this.drawThreat(ctx);
     // bottom panel
     ctx.drawImage(panel(), -VIEW.ox, H - 14);
     const max = ps.maxShield();
@@ -1218,6 +1267,21 @@ export class World {
     if (sl && !this.host.demo) text(ctx, sl, 160, 3, 'grey', 1, 0.5);
     if (this.showMap) this.drawMinimap(ctx);
   }
+
+  /** Threat meter under the hi-score: five pips, green to red, flashing when it has just gone up. */
+  drawThreat(ctx: Ctx) {
+    const lvl = this.dir.level, x0 = 286, y = 13;
+    text(ctx, 'THREAT', x0 - 4, y - 1, lvl >= 4 ? 'red' : 'grey', 1, 1);
+    const cols = ['#44dd55', '#aadd33', '#ffcc22', '#ff8822', '#ff3322'];
+    for (let i = 0; i < 5; i++) {
+      const on = i < lvl;
+      ctx.fillStyle = on ? cols[i] : 'rgba(30,34,52,0.85)';
+      ctx.fillRect(x0 + i * 6, y, 5, 5);
+      if (on) { ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.fillRect(x0 + i * 6, y, 5, 1); }
+    }
+    if (this.debugThreat) text(ctx, `P${this.dir.power.toFixed(1)} T${this.dir.threat.toFixed(2)} F${this.dir.form.toFixed(2)}`, 316, 22, 'grey', 1, 1);
+  }
+  get debugThreat() { return this.host.debug; }
 
   /** Debug minimap: whole level tile grid with spawns, checkpoints, boss arenas and the current view. */
   drawMinimap(ctx: Ctx) {

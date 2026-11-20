@@ -1,6 +1,7 @@
 // Boss framework: huge multi-part bosses destroyed piece by piece, plus nine boss designs.
 import { renderShapes, Shape, Spr, flashOf } from '../art/sprites';
-import { charred, cracked, Ctx, rnd, recolor, snap } from '../engine/gfx';
+import { charred, cracked, Ctx, rnd, recolor, snap, RNG, RampName } from '../engine/gfx';
+import { emissiveOf, shadowOf } from '../engine/light';
 import { audio } from '../engine/audio';
 import type { World } from './World';
 
@@ -98,10 +99,18 @@ function defineBosses() {
   const clawL: PartDef = {
     id: 'clawL', x: -92, y: 40, w: 40, h: 36, hp: 45, pad: 20,
     shapes: [
-      { t: 'poly', p: [-12, 4, -16, 28, -9, 30, -2, 10], r: 'red', l: 0.8 },
-      { t: 'poly', p: [10, 4, 13, 26, 7, 28, 2, 10], r: 'red', l: 0.6 },
-      { t: 'ell', x: 0, y: -4, rx: 18, ry: 14, r: 'red' },
-      { t: 'ell', x: -5, y: -8, rx: 8, ry: 5, r: 'orange', z: 8, bias: 0.1 },
+      // jointed forearm, armoured palm, serrated pincers
+      { t: 'ell', x: 10, y: -16, rx: 8, ry: 7, r: 'red', z: -2 },
+      { t: 'ell', x: 7, y: -12, rx: 4, ry: 4, r: 'dark', z: -1 },
+      { t: 'poly', p: [-12, 2, -19, 26, -13, 31, -4, 9], r: 'red', l: 0.85 },
+      { t: 'poly', p: [9, 3, 14, 24, 8, 28, 2, 9], r: 'red', l: 0.6 },
+      ...[8, 14, 20].map((y) => ({ t: 'poly', p: [-6 - y * 0.3, y, -2 - y * 0.3, y + 2, -7 - y * 0.3, y + 4], r: 'bone', l: 0.9, z: 2 } as Shape)),
+      ...[10, 16].map((y) => ({ t: 'poly', p: [3 + y * 0.2, y, 0 + y * 0.2, y + 2, 4 + y * 0.2, y + 4], r: 'bone', l: 0.9, z: 2 } as Shape)),
+      { t: 'ell', x: 0, y: -4, rx: 17, ry: 13, r: 'red' },
+      { t: 'ell', x: -4, y: -8, rx: 9, ry: 5, r: 'orange', z: 8, bias: 0.05 },
+      { t: 'ell', x: -9, y: -2, rx: 2.4, ry: 2.4, r: 'orange', z: 14, spec: true },
+      { t: 'ell', x: -2, y: 2, rx: 2, ry: 2, r: 'orange', z: 14, spec: true },
+      { t: 'ell', x: 6, y: -6, rx: 2, ry: 2, r: 'orange', z: 14, spec: true },
     ],
     guns: [{ kind: 'spread', every: 100, n: 5, arc: 0.9, speed: 1.6 }],
   };
@@ -165,7 +174,7 @@ function defineBosses() {
   };
 
   // ===== Level 3 mid: LARVA QUEEN =====
-  const wingL: PartDef = { id: 'wingL', x: -58, y: -14, w: 56, h: 66, hp: 36, under: true, shapes: [{ t: 'ell', x: 0, y: 0, rx: 28, ry: 34, r: 'cyan', bias: 0.25 }, { t: 'line', x0: 20, y0: -20, x1: -15, y1: 20, c: '#225566' }, { t: 'line', x0: 20, y0: -20, x1: -22, y1: -5, c: '#225566' }], guns: [{ kind: 'spread', every: 90, n: 3, arc: 0.5, speed: 1.8 }] };
+  const wingL: PartDef = { id: 'wingL', x: -58, y: -14, w: 56, h: 66, hp: 36, under: true, shapes: [{ t: 'ell', x: 0, y: 0, rx: 28, ry: 34, r: 'cyan', bias: 0.25 }, ...[[-15, 20], [-22, -5], [-6, 30], [-26, 10], [-10, -28]].map(([x1, y1]) => ({ t: 'line', x0: 20, y0: -20, x1, y1, c: '#225566' } as Shape)), ...[[-4, 4, -14, 12], [6, -6, -10, -12], [-8, 18, -20, 22], [0, 14, 4, 26]].map(([x0, y0, x1, y1]) => ({ t: 'line', x0, y0, x1, y1, c: '#3a7a8a' } as Shape)), { t: 'ell', x: -12, y: 10, rx: 2.5, ry: 2.5, r: 'slime', z: 4, spec: true }], guns: [{ kind: 'spread', every: 90, n: 3, arc: 0.5, speed: 1.8 }] };
   BOSSES.larva = {
     name: 'LARVA QUEEN', w: 190, h: 150, sym: true, bodyHit: [-30, -62, 60, 104], move: 'track', amp: 0, ty: 72, cash: 1200, score: 12000, bomb: false,
     body: [
@@ -274,6 +283,204 @@ function defineBosses() {
   };
 }
 
+// ---------- surface detail ----------
+// Hand-placed greebles layered over each base boss body: ridges, spikes, veins, rivets, vents and lamps. Symmetric
+// bosses are mirrored after rendering, so their detail only needs placing on the left half (x <= 0).
+const Z = 60; // above every body dome
+const stud = (x: number, y: number, r: number, ramp: RampName, z = Z): Shape => ({ t: 'ell', x, y, rx: r, ry: r, r: ramp, z, spec: true });
+const lamp = (x: number, y: number, r: number, ramp: 'eye' | 'cyan' | 'red' | 'yellow' | 'slime' = 'eye', z = Z + 4): Shape => ({ t: 'ell', x, y, rx: r, ry: r * 0.9, r: ramp, z, spec: true, bias: 0.25, glow: true });
+const crack = (pts: number[], c = '#2a2018', z = Z + 2): Shape[] => {
+  const out: Shape[] = [];
+  for (let i = 0; i + 3 < pts.length; i += 2) out.push({ t: 'line', x0: pts[i], y0: pts[i + 1], x1: pts[i + 2], y1: pts[i + 3], c, z });
+  return out;
+};
+/** thorn poking outwards from a point on an ellipse rim (angle a, radians) */
+const thorn = (cx: number, cy: number, rx: number, ry: number, a: number, len: number, w: number, ramp: RampName): Shape => {
+  const bx = cx + Math.cos(a) * rx * 0.96, by = cy + Math.sin(a) * ry * 0.96;
+  const nx = Math.cos(a), ny = Math.sin(a), px = -ny * w, py = nx * w;
+  return { t: 'poly', p: [bx + px, by + py, bx + nx * len, by + ny * len, bx - px, by - py], r: ramp, l: 0.75, z: -3 };
+};
+const rivetRow = (x0: number, x1: number, y: number, step: number, ramp: RampName = 'steel', z = Z): Shape[] => {
+  const out: Shape[] = [];
+  for (let x = x0; x <= x1; x += step) out.push(stud(x, y, 1.2, ramp, z));
+  return out;
+};
+const vent = (x: number, y: number, w: number, h: number, glow: 'eye' | 'cyan' | 'red' = 'eye', z = Z): Shape[] => [
+  { t: 'box', x, y, w, h, r: 'dark', bevel: 1, z },
+  ...Array.from({ length: Math.max(1, Math.floor(w / 4)) }, (_, i) => ({ t: 'box', x: x - w / 2 + 2 + i * 4, y, w: 2, h: h - 2, r: glow, bevel: 0, z: z + 1 } as Shape)),
+];
+
+// ---- procedural armour / anatomy helpers ----
+/** overlapping shingled plates covering an ellipse (lower rows overlap upper ones, like a carapace or scales) */
+const scales = (cx: number, cy: number, rx: number, ry: number, rows: number, ramp: RampName, z = Z, size = 1, seed = 1, aspect = 1, jitter = 0.15): Shape[] => {
+  const out: Shape[] = [], rng = new RNG(seed);
+  for (let j = 0; j < rows; j++) {
+    const v = -1 + (2 * (j + 0.5)) / rows, half = Math.sqrt(Math.max(0, 1 - v * v)) * rx;
+    const pr = (ry / rows) * 1.25 * size;
+    const n = Math.max(1, Math.round((half * 2) / (pr * 1.7)));
+    for (let i = 0; i < n; i++) {
+      const u = n === 1 ? 0 : -1 + (2 * i) / (n - 1);
+      const x = cx + u * (half - pr * 0.6) + (j % 2 ? pr * 0.4 : 0), y = cy + v * ry * 0.9;
+      const k = 1 + rng.range(-jitter, jitter);
+      out.push({ t: 'ell', x: x + rng.range(-jitter, jitter) * pr, y: y + rng.range(-jitter, jitter) * pr, rx: pr * 1.05 * aspect * k, ry: (pr * 0.85 / aspect) * k, r: ramp, z: z + j * 2, bias: rng.range(-0.08, 0.06) });
+    }
+  }
+  return out;
+};
+/** segmented limb / tentacle: a chain of shrinking joints from (x, y) along angle a */
+const limb = (x: number, y: number, a: number, len: number, segs: number, r0: number, ramp: RampName, z = -2, curl = 0.18): Shape[] => {
+  const out: Shape[] = [];
+  let px = x, py = y, ang = a;
+  for (let i = 0; i < segs; i++) {
+    const k = 1 - i / segs, r = Math.max(1.2, r0 * (0.45 + 0.55 * k));
+    out.push({ t: 'ell', x: px, y: py, rx: r, ry: r, r: ramp, z: z - i * 0.1 });
+    if (i % 2 === 1) out.push({ t: 'ell', x: px, y: py, rx: r * 0.55, ry: r * 0.55, r: 'dark', z: z + 0.5 });
+    px += Math.cos(ang) * (len / segs); py += Math.sin(ang) * (len / segs);
+    ang += curl;
+  }
+  out.push({ t: 'poly', p: [px - 1.5, py, px + Math.cos(ang) * 6, py + Math.sin(ang) * 6, px + 1.5, py], r: ramp, l: 0.8, z });
+  return out;
+};
+/** grid of bevelled armour panels with dark seams */
+const panels = (x: number, y: number, w: number, h: number, cols: number, rows: number, ramp: RampName, z = Z, seed = 2): Shape[] => {
+  const out: Shape[] = [], rng = new RNG(seed);
+  const cw = w / cols, ch = h / rows;
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    if (rng.next() < 0.12) continue; // a few missing panels expose the dark frame
+    const wide = rng.next() < 0.2 && i < cols - 1 ? 2 : 1;
+    out.push({ t: 'box', x: x - w / 2 + (i + wide / 2) * cw, y: y - h / 2 + (j + 0.5) * ch, w: cw * wide - 1.5, h: ch - 1.5, r: ramp, bevel: 1.5, z, bias: rng.range(-0.08, 0.06) });
+    if (rng.next() < 0.3) out.push(stud(x - w / 2 + i * cw + 2, y - h / 2 + j * ch + 2, 0.8, 'steel', z + 2));
+    if (wide === 2) i++;
+  }
+  return out;
+};
+/** stacked body segments (insect abdomen, spine) */
+const segs = (x: number, y0: number, y1: number, n: number, rx: number, ramp: RampName, z = Z): Shape[] =>
+  Array.from({ length: n }, (_, i) => {
+    const t = i / Math.max(1, n - 1), y = y0 + (y1 - y0) * t, w = rx * (0.65 + 0.35 * Math.sin(t * Math.PI));
+    return { t: 'ell', x, y, rx: w, ry: Math.abs(y1 - y0) / n * 0.75, r: ramp, z: z + i, bias: (i % 2) * 0.06 } as Shape;
+  });
+
+const DETAIL: Record<string, () => Shape[]> = {
+  carcinox: () => [
+    // shingled carapace plates, a crest of knobs, rim thorns and jointed legs
+    ...scales(0, -6, 60, 32, 4, 'shell', Z, 1.1, 3, 1.6, 0.18),
+    ...[-44, -30, -16, -2].map((x, i) => stud(x, -34 + i * 0.5, 2.6, 'orange', Z + 12)),
+    ...[3.6, 3.85, 4.1, 4.35, 4.6].map((a) => thorn(0, 0, 75, 46, a, 12, 3.5, 'shell')),
+    ...limb(-62, -18, Math.PI * 1.12, 46, 6, 4.2, 'shell', -4, -0.12),
+    ...limb(-66, 8, Math.PI * 1.02, 50, 6, 4.4, 'shell', -4, 0.05),
+    ...limb(-60, 28, Math.PI * 0.86, 46, 6, 4.2, 'shell', -4, 0.14),
+    { t: 'poly', p: [-6, 30, -24, 50, -10, 44, -2, 36], r: 'red', l: 0.8, z: Z + 14 },
+    lamp(-38, 22, 2.2), lamp(-48, 18, 1.8), lamp(-28, 26, 1.6),
+  ],
+  ossuar: () => [
+    // cheekbones, temple ridges, deep sockets, a nasal cavity, cracks, teeth, a trailing spine and ringed horns
+    ...segs(0, 60, 112, 6, 9, 'bone', -6),
+    { t: 'ell', x: -48, y: 14, rx: 14, ry: 9, r: 'bone', z: Z, bias: 0.05 },
+    { t: 'ell', x: -56, y: -30, rx: 9, ry: 16, r: 'bone', z: Z - 2, bias: -0.04 },
+    { t: 'ell', x: -28, y: -6, rx: 16, ry: 14, r: 'dark', z: Z + 2, bias: 0.12 },
+    { t: 'box', x: -28, y: -24, w: 34, h: 6, r: 'bone', bevel: 2, z: Z + 4 },
+    { t: 'poly', p: [0, 10, -7, 26, 0, 22], r: 'dark', l: 0.3, z: Z + 6 },
+    ...crack([-8, -64, -16, -50, -12, -38, -22, -30]),
+    ...crack([-50, -40, -58, -28, -52, -18]),
+    ...crack([-40, 12, -48, 22, -44, 30]),
+    ...[-34, -26, -18, -10, -2].map((x) => ({ t: 'box', x, y: 30, w: 6, h: 9, r: 'bone', bevel: 1, z: Z + 6 } as Shape)),
+    lamp(-12, -42, 2, 'cyan', Z + 8), lamp(-4, -54, 1.6, 'cyan', Z + 8),
+    ...[0.15, 0.35, 0.55, 0.75].map((k) => ({ t: 'ell', x: -48 - k * 38, y: -44 - k * 40, rx: 4 - k * 2, ry: 2, r: 'bone', z: 2, bias: -0.1 } as Shape)),
+  ],
+  mothersp: () => {
+    const rng = new RNG(77), out: Shape[] = [];
+    // dangling tentacles, a cellular membrane, veins, pustules and glowing nodes
+    for (let i = 0; i < 8; i++) {
+      const a = Math.PI * (0.15 + (i / 7) * 0.7);
+      out.push(...limb(Math.cos(a) * 92, Math.sin(a) * 52, a, 34, 7, 4, i % 2 ? 'slime' : 'purple', -6, (i < 4 ? -0.1 : 0.1)));
+    }
+    out.push(...scales(0, 0, 84, 48, 4, 'slime', Z - 8, 1.25, 11, 1.25, 0.45));
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2 + rng.range(-0.15, 0.15);
+      let x = Math.cos(a) * 20, y = Math.sin(a) * 14;
+      const pts = [x, y];
+      for (let k = 0; k < 4; k++) { x += Math.cos(a) * 18 + rng.range(-6, 6); y += Math.sin(a) * 11 + rng.range(-4, 4); pts.push(x, y); }
+      out.push(...crack(pts, '#0c3a22', Z + 6));
+    }
+    for (let i = 0; i < 18; i++) {
+      const a = rng.range(0, Math.PI * 2), d = rng.range(0.3, 0.9);
+      const x = Math.cos(a) * 92 * d, y = Math.sin(a) * 56 * d;
+      out.push(i % 4 === 0 ? lamp(x, y, rng.range(1.6, 2.6), 'slime', Z + 10) : stud(x, y, rng.range(2, 4.5), i % 2 ? 'slime' : 'yellow', Z + 8));
+    }
+    return out;
+  },
+  larva: () => [
+    // segmented abdomen, three pairs of jointed legs, antennae, mandibles, spiracles and a glowing egg tip
+    ...segs(0, -60, 10, 7, 30, 'yellow', Z - 10),
+    ...[-56, -44, -32, -20, -8].map((y) => stud(-24, y, 1.8, 'dark', Z + 2)),
+    ...limb(-20, -6, Math.PI * 0.9, 34, 5, 3, 'dark', -4, -0.25),
+    ...limb(-22, -24, Math.PI * 1.0, 38, 5, 3, 'dark', -4, -0.2),
+    ...limb(-20, -42, Math.PI * 1.1, 34, 5, 3, 'dark', -4, -0.15),
+    { t: 'poly', p: [-4, 34, -22, 70, -18, 71, -2, 38], r: 'dark', l: 0.6, z: Z + 20 },
+    stud(-21, 70, 2.2, 'yellow', Z + 21),
+    { t: 'poly', p: [-6, 36, -16, 52, -8, 48, -2, 40], r: 'red', l: 0.8, z: Z + 20 },
+    lamp(-10, 24, 1.6, 'cyan', Z + 22),
+    lamp(0, -66, 4, 'yellow', Z + 10),
+  ],
+  vinemaw: () => [
+    // bark plates, thorny crown, creeping tendrils, glowing blossoms and teeth round the lip
+    ...scales(0, -14, 72, 40, 4, 'green', Z - 6, 1.1, 5, 0.62, 0.3),
+    ...[3.5, 3.8, 4.1, 4.4, 4.7].map((a, i) => thorn(0, -10, 82, 52, a, 10 + (i % 2) * 5, 3, 'green')),
+    ...limb(-76, 20, Math.PI * 0.75, 40, 7, 3, 'green', -4, 0.2),
+    ...limb(-60, 36, Math.PI * 0.62, 34, 6, 2.6, 'green', -4, 0.25),
+    ...crack([-110, -50, -90, -42, -70, -34], '#0c3a12'),
+    ...[[-46, -28], [-24, -44], [-62, -6], [-8, -50]].flatMap(([x, y]) => [
+      ...[0, 1.26, 2.51, 3.77, 5.03].map((a) => ({ t: 'ell', x: x + Math.cos(a) * 3.4, y: y + Math.sin(a) * 3.4, rx: 2.6, ry: 2.6, r: 'red', z: Z + 14 } as Shape)),
+      lamp(x, y, 2, 'yellow', Z + 16),
+    ]),
+    ...[-44, -34, -24, -14, -4].map((x) => ({ t: 'poly', p: [x - 3, 26, x, 36, x + 3, 26], r: 'bone', l: 0.9, z: Z + 16 } as Shape)),
+  ],
+  pipeheart: () => [
+    // armoured backplate, rivets, brass couplings, arteries, veins and glowing valves
+    ...panels(0, -2, 170, 40, 10, 2, 'steel', 1, 9),
+    ...rivetRow(-92, 92, -30, 9, 'steel', 14),
+    ...rivetRow(-78, 78, 25, 9, 'steel', 14),
+    ...[-70, -40, 40, 70].map((x) => ({ t: 'box', x, y: -30, w: 5, h: 14, r: 'gold', bevel: 1, z: 16 } as Shape)),
+    ...[-60, 60].map((x) => ({ t: 'box', x, y: 25, w: 5, h: 12, r: 'gold', bevel: 1, z: 16 } as Shape)),
+    { t: 'cyl', x: -62, y: -48, w: 8, h: 30, r: 'steel', z: 12 }, { t: 'cyl', x: 62, y: -48, w: 8, h: 30, r: 'steel', z: 12 },
+    ...crack([-30, -14, -44, -26, -58, -30], '#5a0a14', Z), ...crack([30, -14, 44, -26, 58, -30], '#5a0a14', Z),
+    ...crack([-20, 30, -38, 22, -50, 25], '#5a0a14', Z),
+    ...crack([-40, -10, -50, 6, -44, 20], '#7a1a24', Z), ...crack([40, -10, 50, 6, 44, 20], '#7a1a24', Z),
+    lamp(-82, -30, 2, 'cyan', 18), lamp(82, -30, 2, 'cyan', 18), lamp(-20, 25, 1.8, 'cyan', 18), lamp(20, 25, 1.8, 'cyan', 18),
+  ],
+  fleshforge: () => [
+    // plated hull, rivet rows, glowing vents, a brass pipe, hazard chevrons, flesh pods and warning lamps
+    ...panels(-70, -14, 140, 62, 7, 3, 'steel', 8, 4),
+    ...rivetRow(-134, -6, -52, 10, 'steel', 30),
+    ...rivetRow(-134, -6, 31, 10, 'steel', 30),
+    ...vent(-40, -26, 26, 8, 'eye', 32), ...vent(-136, 0, 12, 18, 'eye', 32),
+    { t: 'cyl', x: -80, y: -30, w: 100, h: 4, r: 'gold', vert: false, z: 34 },
+    ...[-92, -78, -64, -50, -36, -22, -8].map((x, i) => ({ t: 'poly', p: [x, 42, x + 6, 42, x + 2, 50, x - 4, 50], r: i % 2 ? 'dark' : 'yellow', l: 0.85, z: 34 } as Shape)),
+    ...scales(-95, 12, 34, 20, 3, 'flesh', 24, 1.1, 7, 1.2, 0.4),
+    lamp(-132, -48, 2.2, 'red', 36), lamp(-60, -48, 1.8, 'red', 36),
+  ],
+  sentinel: () => [
+    // radial armour petals, a ring of running lights and an equatorial band
+    ...Array.from({ length: 12 }, (_, i) => { const a = (i / 12) * Math.PI * 2; return { t: 'poly', p: [Math.cos(a - 0.2) * 30, Math.sin(a - 0.2) * 30, Math.cos(a) * 49, Math.sin(a) * 49, Math.cos(a + 0.2) * 30, Math.sin(a + 0.2) * 30], r: i % 2 ? 'steel' : 'chrome', l: 0.75, z: Z } as Shape; }),
+    ...Array.from({ length: 8 }, (_, i) => { const a = (i / 8) * Math.PI * 2 + Math.PI / 8; return { t: 'box', x: Math.cos(a) * 38, y: Math.sin(a) * 38, w: 8, h: 8, r: 'steel', bevel: 2, z: Z + 4 } as Shape; }),
+    ...Array.from({ length: 12 }, (_, i) => { const a = (i / 12) * Math.PI * 2; return lamp(Math.cos(a) * 26, Math.sin(a) * 26, 1.6, 'cyan', Z + 6); }),
+  ],
+  overmind: () => [
+    // plated superstructure, light strips, glowing vents, rivets, antenna towers and exhaust ports
+    ...panels(-95, -18, 180, 56, 9, 3, 'steel', 8, 6),
+    { t: 'box', x: -100, y: -44, w: 120, h: 2, r: 'cyan', bevel: 0, z: 20 },
+    { t: 'box', x: -100, y: 4, w: 120, h: 2, r: 'cyan', bevel: 0, z: 20 },
+    ...vent(-60, -30, 22, 8, 'eye', 18), ...vent(-150, -16, 14, 20, 'cyan', 18),
+    ...rivetRow(-180, -10, -60, 10, 'steel', 22),
+    ...rivetRow(-180, -10, 24, 10, 'steel', 22),
+    { t: 'poly', p: [-104, -62, -100, -84, -96, -62], r: 'steel', l: 0.8, z: 6 }, lamp(-100, -85, 2, 'red', 8),
+    { t: 'poly', p: [-144, -62, -141, -78, -138, -62], r: 'steel', l: 0.8, z: 6 }, lamp(-141, -79, 1.6, 'red', 8),
+    { t: 'ell', x: -140, y: 27, rx: 7, ry: 4, r: 'dark', z: 22 }, lamp(-140, 27, 3.5, 'eye', 23),
+    { t: 'ell', x: -100, y: 27, rx: 7, ry: 4, r: 'dark', z: 22 }, lamp(-100, 27, 3.5, 'eye', 23),
+  ],
+};
+
 // ---------- runtime ----------
 interface PartRT {
   def: PartDef; hp: number; max: number; dead: boolean; flash: number;
@@ -283,6 +490,9 @@ const SPR_CACHE = new Map<string, { body: Spr; parts: Map<string, { spr: Spr[]; 
 
 export function buildBossArt() {
   defineBosses();
+  for (const [k, f] of Object.entries(DETAIL)) if (BOSSES[k]) BOSSES[k].body.push(...f());
+  // room for limbs, spines and towers that reach past the original canvas (art stays centred)
+  for (const [k, g] of Object.entries({ ossuar: 90, mothersp: 44, overmind: 24, larva: 10 })) if (BOSSES[k]) BOSSES[k].h += g;
   for (const key of Object.keys(BOSSES)) ensureBossArt(key);
 }
 
@@ -293,14 +503,16 @@ export function ensureBossArt(key: string) {
   const d = BOSSES[key];
   const hue = d.hue ?? 0;
   const rc = (c: Spr) => (hue ? recolor(c, hue, 1.1, 1) : c);
-  const body = rc(renderShapes(d.w, d.h, d.body, d.sym));
+  const body = rc(renderShapes(d.w, d.h, d.body, d.sym, true));
+  emissiveOf(body);
   const parts = new Map<string, { spr: Spr[]; crack: Spr; char: Spr }>();
   for (const p of d.parts) {
     const pad = p.pad ?? 12;
     const cw = p.w + pad * 2, ch = p.h + pad * 2;
     let spr: Spr[];
-    if (p.anim === 'eye') spr = [-0.7, 0, 0.7].map((lx) => rc(renderShapes(cw, ch, p.shapes.map((s) => (s.t === 'eye' ? { ...s, lx, ly: 0.6 } : s)))));
-    else spr = [rc(renderShapes(cw, ch, p.shapes))];
+    if (p.anim === 'eye') spr = [-0.7, 0, 0.7].map((lx) => rc(renderShapes(cw, ch, p.shapes.map((s) => (s.t === 'eye' ? { ...s, lx, ly: 0.6 } : s)), false, true)));
+    else spr = [rc(renderShapes(cw, ch, p.shapes, false, true))];
+    for (const s of spr) emissiveOf(s);
     parts.set(p.id, { spr, crack: cracked(spr[spr.length > 1 ? 1 : 0], p.x + 7), char: charred(spr[spr.length > 1 ? 1 : 0], p.y + 3) });
   }
   const art = { body, parts };
@@ -511,6 +723,7 @@ export class Boss {
     const x = this.ox + (this.x - this.ox) * a, y = this.oy + (this.y - this.oy) * a;
     const d = this.def;
     const shakeX = this.state === 'dying' ? rnd(-2, 2) : 0;
+    const glows: [Spr, number, number, number, number][] = [];
     const drawPart = (p: PartRT) => {
       const px = snap(x + p.def.x + shakeX), py = snap(y + p.def.y);
       let s: Spr;
@@ -523,7 +736,10 @@ export class Boss {
       if (p.flash > 0 && !p.dead) s = flashOf(s);
       let sw = s.width, sh = s.height;
       if (p.def.anim === 'pulse' && !p.dead) { const k = 1 + Math.sin(this.t * 0.15) * 0.05; sw = Math.round(sw * k); sh = Math.round(sh * k); }
+      // parts sit on the hull: soft contact shadow down-right
+      if (!p.def.under) ctx.drawImage(shadowOf(s), px - (sw >> 1) + 2.5, py - (sh >> 1) + 3.5, sw, sh);
       ctx.drawImage(s, px - (sw >> 1), py - (sh >> 1), sw, sh);
+      if (!p.dead) glows.push([s, px - (sw >> 1), py - (sh >> 1), sw, sh]);
       // vulnerable cores glint
       if (p.def.core && !p.dead && this.vulnerable(p) && this.t % 30 < 4) {
         ctx.drawImage(flashOf(s), px - (sw >> 1), py - (sh >> 1), sw, sh);
@@ -532,7 +748,19 @@ export class Boss {
     };
     for (const p of this.parts) if (p.def.under) drawPart(p);
     ctx.drawImage(this.body, snap(x - d.w / 2 + shakeX), snap(y - d.h / 2));
+    glows.push([this.body, snap(x - d.w / 2 + shakeX), snap(y - d.h / 2), d.w, d.h]);
     for (const p of this.parts) if (!p.def.under) drawPart(p);
+    // lamps, eyes, cores and vents glow and breathe
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = (this.state === 'dying' ? 0.4 : 0.55) + Math.sin(this.t * 0.09) * 0.25;
+    for (const [s, gx, gy, gw, gh] of glows) {
+      const e = emissiveOf(s);
+      if (!e) continue;
+      const kx = gw / s.width, ky = gh / s.height;
+      ctx.drawImage(e.c, gx - e.pad * kx, gy - e.pad * ky, e.c.width * kx, e.c.height * ky);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
     // beams
     for (const p of this.parts) {
       if (p.dead || p.beam <= 0) continue;

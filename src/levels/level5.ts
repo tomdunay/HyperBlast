@@ -60,8 +60,8 @@ export function level5(): LevelDef {
     .wall(4, 'sentry', 'L').wall(4, 'sentry', 'R');
   b.end('overmind');
   return b.build(4, 'METALLIC SPACEWAYS', {
-    rock: ramp(['#04060c', '#1a2236', '#3a4a6a', '#6a82a8', '#b4c8e4', '#ffffff'], 8),
-    alt: ramp(['#100800', '#3a2a00', '#8a6a00', '#d4b020', '#ffee88'], 8),
+    rock: ramp(['#04060c', '#1a2236', '#3a4a6a', '#6a82a8', '#b4c8e4', '#ffffff'], 16),
+    alt: ramp(['#100800', '#3a2a00', '#8a6a00', '#d4b020', '#ffee88'], 16),
     bg: ['#000008', '#050a1c', '#000008'],
     far: ramp(['#0a0e1c', '#121a2c', '#1a243c', '#24304c'], 4),
     wobble: 0, tex: 'metal', ambient: 'stars', ambientColor: 'rgba(200,220,255,0.7)',

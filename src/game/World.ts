@@ -1,6 +1,6 @@
 // The in-level game: scroll (forward/reverse), spawns by scroll position, collisions, bosses, HUD.
 import { Pool } from '../engine/pool';
-import { Ctx, rnd, makeCanvas } from '../engine/gfx';
+import { Ctx, rnd, makeCanvas, hiCanvas, RES, snap } from '../engine/gfx';
 import { drawGlow, shadowOf, vignette, hazardStripes, glow, darkVignette, lightShafts, searchCone } from '../engine/light';
 import { input } from '../engine/input';
 import { audio } from '../engine/audio';
@@ -33,13 +33,44 @@ interface Pickup { alive: boolean; kind: 'cash' | 'token'; val: number; tok: Tok
 const BULLET_DMG: Record<string, number> = { eOrb: 9, eBig: 16, eNeedle: 8, eSpore: 8, ePlasma: 11 };
 const TOKEN_GLOW: Record<string, string> = { P: '#ff4433', S: '#33ccff', H: '#44ff44', $: '#ffcc22', Z: '#cc55ff', D: '#3366ff', X: '#ffffff', '1': '#ff9922' };
 
+const ambCache = new Map<string, HTMLCanvasElement>();
+/** colour string (#rgb hex, rgb() or rgba()) with a new alpha */
+function withA(color: string, a: number) {
+  if (color[0] === '#') { const v = parseInt(color.slice(1), 16); return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${a})`; }
+  const n = color.replace(/rgba?\(|\)/g, '').split(',').slice(0, 3).join(',');
+  return `rgba(${n},${a})`;
+}
+/** Ambient particle sprites at art resolution: glassy bubbles, soft dust, glowing spores and embers, twinkling stars. */
+function ambientSprite(kind: string, color: string, size: number): HTMLCanvasElement {
+  const key = kind + color + size;
+  const hit = ambCache.get(key);
+  if (hit) return hit;
+  const r = [1, 2, 3.2][size];
+  const s = Math.ceil(r * 2 + 6);
+  const [c, x] = hiCanvas(s, s);
+  const m = s / 2;
+  if (kind === 'bubbles') {
+    const g = x.createRadialGradient(m - r * 0.3, m - r * 0.3, 0, m, m, r);
+    g.addColorStop(0, 'rgba(255,255,255,0.05)'); g.addColorStop(0.75, withA(color, 0.2)); g.addColorStop(0.92, withA(color, 0.85)); g.addColorStop(1, withA(color, 0));
+    x.fillStyle = g; x.beginPath(); x.arc(m, m, r, 0, Math.PI * 2); x.fill();
+    x.fillStyle = 'rgba(255,255,255,0.9)'; x.beginPath(); x.arc(m - r * 0.4, m - r * 0.4, Math.max(0.35, r * 0.25), 0, Math.PI * 2); x.fill();
+  } else {
+    const glowR = kind === 'spores' || kind === 'embers' ? r * 2.6 : r * 1.3;
+    const g = x.createRadialGradient(m, m, 0, m, m, glowR);
+    g.addColorStop(0, 'rgba(255,255,255,0.9)'); g.addColorStop(0.2, withA(color, 0.8)); g.addColorStop(1, withA(color, 0));
+    x.fillStyle = g; x.beginPath(); x.arc(m, m, glowR, 0, Math.PI * 2); x.fill();
+  }
+  ambCache.set(key, c);
+  return c;
+}
+
 const hudPanels = new Map<number, HTMLCanvasElement>();
 /** Bevelled, riveted metal HUD strip spanning the whole view (draw at x = -VIEW.ox). */
 function panel(): HTMLCanvasElement {
   const VW = VIEW.w, ox = VIEW.ox;
   const hit = hudPanels.get(VW);
   if (hit) return hit;
-  const [c, x] = makeCanvas(VW, 14);
+  const [c, x] = hiCanvas(VW, 14);
   const g = x.createLinearGradient(0, 0, 0, 14);
   g.addColorStop(0, '#8a94b4'); g.addColorStop(0.15, '#5a6488'); g.addColorStop(0.6, '#2c3250'); g.addColorStop(1, '#12162a');
   x.fillStyle = g; x.fillRect(0, 0, VW, 14);
@@ -799,7 +830,7 @@ export class World {
   render(ctx: Ctx, a: number) {
     const sh = this.fx.shake;
     ctx.save();
-    if (sh > 0) ctx.translate(Math.round(rnd(-sh, sh)), Math.round(rnd(-sh, sh)));
+    if (sh > 0) ctx.translate(snap(rnd(-sh, sh)), snap(rnd(-sh, sh)));
     this.sc.drawBg(ctx, a, this.t);
     this.drawAmbient(ctx, a);
     // shadows fall on the background, under the scenery
@@ -820,13 +851,13 @@ export class World {
     for (const b of this.pb.list) {
       const x = b.ox + (b.x - b.ox) * a, y = b.oy + (b.y - b.oy) * a;
       if (b.kind === 'homing' || (b.kind === 'bolt' && b.ang !== 0 && b.spr !== S.side && b.spr.width < b.spr.height)) {
-        ctx.save(); ctx.translate(Math.round(x), Math.round(y)); ctx.rotate(b.ang); ctx.drawImage(b.spr, -(b.spr.width >> 1), -(b.spr.height >> 1)); ctx.restore();
-      } else ctx.drawImage(b.spr, Math.round(x - b.spr.width / 2), Math.round(y - b.spr.height / 2));
+        ctx.save(); ctx.translate(snap(x), snap(y)); ctx.rotate(b.ang); ctx.drawImage(b.spr, -(b.spr.width >> 1), -(b.spr.height >> 1)); ctx.restore();
+      } else ctx.drawImage(b.spr, snap(x - b.spr.width / 2), snap(y - b.spr.height / 2));
     }
     if (this.player.dive === 0) this.player.draw(ctx, a, this);
     for (const b of this.eb.list) {
       const x = b.ox + (b.x - b.ox) * a, y = b.oy + (b.y - b.oy) * a;
-      ctx.drawImage(b.spr, Math.round(x - b.spr.width / 2), Math.round(y - b.spr.height / 2));
+      ctx.drawImage(b.spr, snap(x - b.spr.width / 2), snap(y - b.spr.height / 2));
     }
     this.fx.draw(ctx, a);
     ctx.globalCompositeOperation = 'lighter';
@@ -873,15 +904,15 @@ export class World {
 
   private lightBuf: [HTMLCanvasElement, Ctx] | null = null;
   drawSceneLighting(ctx: Ctx, a: number) {
-    if (!this.lightBuf || this.lightBuf[0].width !== VIEW.w) this.lightBuf = makeCanvas(VIEW.w, H);
+    if (!this.lightBuf || this.lightBuf[0].width !== VIEW.w) this.lightBuf = hiCanvas(VIEW.w, H);
     const [lc, lx] = this.lightBuf;
-    lx.setTransform(1, 0, 0, 1, 0, 0);
+    lx.setTransform(RES, 0, 0, RES, 0, 0);
     lx.globalCompositeOperation = 'source-over';
     lx.clearRect(0, 0, VIEW.w, H);
     lx.translate(VIEW.ox, 0);
     const L = (x: number, y: number, r: number, c: string, s = 1) => {
       const g = glow(Math.round(r / 4) * 4, c, s);
-      lx.drawImage(g, Math.round(x - g.width / 2), Math.round(y - g.height / 2));
+      lx.drawImage(g, snap(x - g.width / 2), snap(y - g.height / 2));
     };
     const p = this.player;
     if (!p.dead && p.dive === 0) {
@@ -915,7 +946,7 @@ export class World {
         const col = th.tex === 'coral' ? '#66ccff' : th.tex === 'vine' ? '#ccff66' : th.tex === 'crystal' ? '#88ffff' : '#ffeecc';
         const s = lightShafts(col, th.tex.length);
         ctx.globalAlpha = 0.55 + Math.sin(t * 0.013) * 0.25;
-        ctx.drawImage(s, Math.round(-40 - MARGIN + Math.sin(t * 0.004) * 30), 0);
+        ctx.drawImage(s, snap(-40 - MARGIN + Math.sin(t * 0.004) * 30), 0);
         ctx.globalAlpha = 1;
         break;
       }
@@ -925,7 +956,7 @@ export class World {
         ctx.globalAlpha = k;
         for (let x = 20 - Math.ceil(VIEW.ox / 56) * 56; x < W + VIEW.ox; x += 56) {
           const g = glow(48, '#ff4400', 1);
-          ctx.drawImage(g, x - 48 + Math.round(Math.sin(t * 0.02 + x) * 8), H - 40);
+          ctx.drawImage(g, x - 48 + snap(Math.sin(t * 0.02 + x) * 8), H - 40);
         }
         ctx.globalAlpha = 1;
         break;
@@ -976,7 +1007,7 @@ export class World {
 
   /** Drop shadows of flying objects onto the background (offset grows with "height"). */
   drawShadows(ctx: Ctx, a: number) {
-    const put = (s: Spr, x: number, y: number) => { const sh = shadowOf(s); ctx.drawImage(sh, Math.round(x - s.width / 2), Math.round(y - s.height / 2)); };
+    const put = (s: Spr, x: number, y: number) => { const sh = shadowOf(s); ctx.drawImage(sh, snap(x - s.width / 2), snap(y - s.height / 2)); };
     if (this.boss) {
       const b = this.boss, x = b.ox + (b.x - b.ox) * a, y = b.oy + (b.y - b.oy) * a;
       put(b.body, x + 14, y + 20);
@@ -1053,14 +1084,17 @@ export class World {
       y = ((y % H) + H) % H;
       const x = p.x + (th.ambient === 'spores' || th.ambient === 'bubbles' ? Math.sin(this.t * 0.02 + p.y) * 3 : 0);
       if (x < -VIEW.ox - 2 || x > W + VIEW.ox) continue;
-      if (th.ambient === 'bubbles' && p.z === 2) { ctx.strokeStyle = th.ambientColor; ctx.strokeRect(Math.round(x), Math.round(y), 2, 2); }
-      else ctx.fillRect(Math.round(x), Math.round(y), p.z, p.z);
+      const spr = ambientSprite(th.ambient, th.ambientColor, p.z === 2 ? 1 + (p.s > 0.45 ? 1 : 0) : 0);
+      const glowy = th.ambient === 'spores' || th.ambient === 'embers';
+      if (glowy) ctx.globalCompositeOperation = 'lighter';
+      ctx.drawImage(spr, snap(x - spr.width / 2), snap(y - spr.height / 2));
+      if (glowy) ctx.globalCompositeOperation = 'source-over';
     }
   }
 
   drawEnemy(ctx: Ctx, e: Enemy, a: number) {
     const d = e.def;
-    const x = Math.round(e.ox + (e.x - e.ox) * a), y = Math.round(e.oy + (e.y - e.oy) * a);
+    const x = snap(e.ox + (e.x - e.ox) * a), y = snap(e.oy + (e.y - e.oy) * a);
     if (d.name === 'capsule') {
       const s = e.flash ? flashOf(S.capsule) : S.capsule;
       ctx.save(); ctx.translate(x, y); ctx.rotate(e.t * 0.05); ctx.drawImage(s, -9, -9); ctx.restore();
@@ -1070,7 +1104,7 @@ export class World {
       for (let i = d.segs; i >= 1; i--) {
         const s = e.trail[i * 7];
         const sp = e.flash ? flashOf(d.segSpr) : d.segSpr;
-        ctx.drawImage(sp, Math.round(s.x - sp.width / 2), Math.round(s.y - sp.height / 2));
+        ctx.drawImage(sp, snap(s.x - sp.width / 2), snap(s.y - sp.height / 2));
       }
     }
     let spr = d.frames[d.anim ? Math.floor(e.t / d.anim) % d.frames.length : 0];
@@ -1085,20 +1119,20 @@ export class World {
       // sniper telegraph: a flickering sight line to the ship
       const px = this.player.x, py = this.player.y, n = Math.hypot(px - x, py - y);
       ctx.fillStyle = '#ff2222';
-      for (let s = 10; s < n; s += 4) ctx.fillRect(Math.round(x + ((px - x) * s) / n), Math.round(y + ((py - y) * s) / n), 1, 1);
+      for (let s = 10; s < n; s += 4) ctx.fillRect(snap(x + ((px - x) * s) / n), snap(y + ((py - y) * s) / n), 1, 1);
     }
     if (d.name === 'eye') {
       // iris tracks the player
       const ang = Math.atan2(this.player.y - y, this.player.x - x);
       ctx.fillStyle = '#ffeecc'; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#cc2200'; ctx.fillRect(Math.round(x + Math.cos(ang) * 2.5 - 2), Math.round(y + Math.sin(ang) * 2.5 - 2), 4, 4);
-      ctx.fillStyle = '#000'; ctx.fillRect(Math.round(x + Math.cos(ang) * 3 - 1), Math.round(y + Math.sin(ang) * 3 - 1), 2, 2);
+      ctx.fillStyle = '#cc2200'; ctx.fillRect(snap(x + Math.cos(ang) * 2.5 - 2), snap(y + Math.sin(ang) * 2.5 - 2), 4, 4);
+      ctx.fillStyle = '#000'; ctx.fillRect(snap(x + Math.cos(ang) * 3 - 1), snap(y + Math.sin(ang) * 3 - 1), 2, 2);
     }
   }
 
   drawPickup(ctx: Ctx, k: Pickup, a: number) {
     if (k.life - k.t < 100 && k.t % 6 < 3) return;
-    const x = Math.round(k.ox + (k.x - k.ox) * a), y = Math.round(k.oy + (k.y - k.oy) * a);
+    const x = snap(k.ox + (k.x - k.ox) * a), y = snap(k.oy + (k.y - k.oy) * a);
     if (k.kind === 'cash') {
       const s = k.val >= 100 ? S.cash100 : k.val >= 50 ? S.cash50 : k.val >= 25 ? S.cash25 : k.val >= 10 ? S.cash10 : S.cash5;
       ctx.drawImage(s, x - (s.width >> 1), y - (s.height >> 1));
@@ -1163,7 +1197,7 @@ export class World {
       const alive = this.boss.parts.filter((p) => !p.dead);
       const tot = this.boss.parts.reduce((s, p) => s + p.max, 0), cur = alive.reduce((s, p) => s + Math.max(0, p.hp), 0);
       ctx.fillStyle = '#300'; ctx.fillRect(110, 13, 100, 3);
-      ctx.fillStyle = '#f42'; ctx.fillRect(110, 13, Math.round((cur / tot) * 100), 3);
+      ctx.fillStyle = '#f42'; ctx.fillRect(110, 13, snap((cur / tot) * 100), 3);
     }
     if (this.player.superT > 0) text(ctx, 'SUPER ' + Math.ceil(this.player.superT / 50), 160, 14, 'cyan', 1, 0.5);
     this.drawSauce(ctx);
@@ -1194,7 +1228,7 @@ export class World {
       const KC: Record<string, string> = { wave: '#ff4444', one: '#ff9933', wall: '#ffff44', cap: '#44ffff' };
       for (const s of lv.spawns) {
         const row = s.kind === 'wall' ? s.row! : Math.round((s.at + H - 16) / 16);
-        x.fillStyle = KC[s.kind]; x.fillRect(Math.max(0, Math.min(38, Math.round((s.x / 320) * 40))), n - 1 - row, 2, 1);
+        x.fillStyle = KC[s.kind]; x.fillRect(Math.max(0, Math.min(38, snap((s.x / 320) * 40))), n - 1 - row, 2, 1);
       }
       x.fillStyle = '#44ff44'; for (const cp of lv.checkpoints) x.fillRect(0, n - 1 - cp / 16, 40, 1);
       x.fillStyle = '#ff44ff';
@@ -1206,7 +1240,7 @@ export class World {
     ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x0 - 2, y0 - 2, 44, h + 4);
     ctx.globalAlpha = 0.85; ctx.drawImage(this.mapCanvas, x0, y0, 40, h); ctx.globalAlpha = 1;
     const vy = y0 + h - ((this.sc.y + H) / 16) * ch;
-    ctx.strokeStyle = '#ffffff'; ctx.strokeRect(x0 - 0.5, Math.round(vy) + 0.5, 41, Math.max(2, Math.round(16 * ch)));
+    ctx.strokeStyle = '#ffffff'; ctx.strokeRect(x0 - 0.5, snap(vy) + 0.5, 41, Math.max(2, snap(16 * ch)));
   }
 
   /** Side-entry warning chevrons: flashing indicators at screen edges for incoming enemies. */
@@ -1261,9 +1295,9 @@ export class World {
     ctx.fillRect(x0, 16, bw, 4);
     const amt = hot ? 1 : this.sauce / SAUCE_MAX;
     ctx.fillStyle = hot ? ((this.t & 4) ? '#ff2266' : '#ffaa33') : '#ff4488';
-    ctx.fillRect(x0, 16, Math.max(hot ? bw : 0, Math.round(bw * amt)), 4);
+    ctx.fillRect(x0, 16, Math.max(hot ? bw : 0, snap(bw * amt)), 4);
     ctx.fillStyle = '#fff';
-    ctx.fillRect(x0 + Math.round(bw * SAUCE_SAVE_AT / SAUCE_MAX), 15, 1, 6);
+    ctx.fillRect(x0 + snap(bw * SAUCE_SAVE_AT / SAUCE_MAX), 15, 1, 6);
   }
 
   drawChatter(ctx: Ctx) {

@@ -1,28 +1,48 @@
-// Lighting toolkit: quantised additive glow sprites, cached drop-shadow silhouettes, vignettes and dither fades.
-import { makeCanvas, bayer, Ctx } from './gfx';
+// Lighting toolkit: smooth additive glow sprites, cached drop-shadow silhouettes, vignettes, light shafts and fades.
+// Everything here is rendered at the art resolution (RES) so light falloffs are smooth rather than banded.
+import { makeCanvas, hiCanvas, likeCanvas, realSize, bayer, Ctx, RES } from './gfx';
 import { VIEW, MARGIN } from './view';
 
 const MAXW = 320 + MARGIN * 2;
 
+/** Hi-res canvas filled per real pixel; f gets logical coords (pixel centres) and returns 0..1 alpha or a colour. */
+function paint(w: number, h: number, f: (x: number, y: number) => number, rgb: [number, number, number], aMax = 255, r = RES) {
+  const [c, ctx] = hiCanvas(w, h, r);
+  const [W, H] = realSize(c);
+  const img = ctx.createImageData(W, H);
+  const d = img.data;
+  for (let Y = 0; Y < H; Y++) for (let X = 0; X < W; X++) {
+    const k = f((X + 0.5) / r, (Y + 0.5) / r);
+    if (k <= 0) continue;
+    const i = (Y * W + X) * 4;
+    d[i] = rgb[0]; d[i + 1] = rgb[1]; d[i + 2] = rgb[2]; d[i + 3] = Math.min(255, Math.round(k * aMax));
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+const rgbOf = (color: string): [number, number, number] => { const v = parseInt(color.slice(1), 16); return [(v >> 16) & 255, (v >> 8) & 255, v & 255]; };
+
 const glowCache = new Map<string, HTMLCanvasElement>();
-/** Radial glow quantised to 4 bands with ordered dithering (reads as Amiga-style neon, not a blur). */
+/** Smooth radial glow with a white-hot core (drawn additively). */
 export function glow(r: number, color: string, strength = 1): HTMLCanvasElement {
   const key = r + color + strength;
   let g = glowCache.get(key);
   if (g) return g;
   const s = Math.ceil(r * 2) + 2;
-  const [c, ctx] = makeCanvas(s, s);
-  const img = ctx.createImageData(s, s);
-  const v = parseInt(color.slice(1), 16);
-  const R = (v >> 16) & 255, G = (v >> 8) & 255, B = v & 255;
-  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
-    const d = Math.hypot(x + 0.5 - s / 2, y + 0.5 - s / 2) / r;
-    if (d >= 1) continue;
-    let k = (1 - d) * (1 - d) * 4 + bayer(x, y) * 0.9;
-    k = Math.max(0, Math.min(4, Math.round(k))) / 4;
-    if (!k) continue;
-    const i = (y * s + x) * 4;
-    img.data[i] = R; img.data[i + 1] = G; img.data[i + 2] = B; img.data[i + 3] = Math.round(255 * k * 0.55 * strength);
+  const [R, G, B] = rgbOf(color);
+  const [c, ctx] = hiCanvas(s, s);
+  const [W, H] = realSize(c);
+  const img = ctx.createImageData(W, H);
+  const d = img.data;
+  for (let Y = 0; Y < H; Y++) for (let X = 0; X < W; X++) {
+    const dd = Math.hypot((X + 0.5) / RES - s / 2, (Y + 0.5) / RES - s / 2) / r;
+    if (dd >= 1) continue;
+    // inverse-square-ish falloff, windowed to zero at the edge
+    const k = (1 - dd) * (1 - dd) * (0.35 + 0.65 / (1 + dd * dd * 18));
+    const hot = Math.max(0, 1 - dd * 3.2) * 0.6; // core blends to white
+    const i = (Y * W + X) * 4;
+    d[i] = R + (255 - R) * hot; d[i + 1] = G + (255 - G) * hot; d[i + 2] = B + (255 - B) * hot;
+    d[i + 3] = Math.min(255, Math.round(255 * k * 0.8 * strength));
   }
   ctx.putImageData(img, 0, 0);
   glowCache.set(key, c);
@@ -30,18 +50,20 @@ export function glow(r: number, color: string, strength = 1): HTMLCanvasElement 
 }
 export function drawGlow(ctx: Ctx, x: number, y: number, r: number, color: string, strength = 1) {
   const g = glow(Math.max(2, Math.round(r)), color, strength);
-  ctx.drawImage(g, Math.round(x - g.width / 2), Math.round(y - g.height / 2));
+  ctx.drawImage(g, x - g.width / 2, y - g.height / 2);
 }
 
 const shadowCache = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
-/** Dark translucent silhouette of a sprite, cached. */
+/** Dark translucent silhouette of a sprite, slightly softened, cached. */
 export function shadowOf(src: HTMLCanvasElement): HTMLCanvasElement {
   let s = shadowCache.get(src);
   if (s) return s;
-  const [c, ctx] = makeCanvas(src.width, src.height);
+  const [c, ctx] = likeCanvas(src);
+  ctx.filter = `blur(${0.6}px)`;
   ctx.drawImage(src, 0, 0);
+  ctx.filter = 'none';
   ctx.globalCompositeOperation = 'source-in';
-  ctx.fillStyle = 'rgba(0,0,8,0.42)';
+  ctx.fillStyle = 'rgba(0,0,10,0.5)';
   ctx.fillRect(0, 0, c.width, c.height);
   shadowCache.set(src, c);
   return c;
@@ -53,20 +75,14 @@ export function vignette(): HTMLCanvasElement {
   const W = VIEW.w;
   let vig = vigs.get(W);
   if (vig) return vig;
-  const [c, ctx] = makeCanvas(W, 256);
-  const img = ctx.createImageData(W, 256);
-  for (let y = 0; y < 256; y++) for (let x = 0; x < W; x++) {
+  vig = paint(W, 256, (x, y) => {
     const dx = Math.abs(x - W / 2) / (W / 2), dy = Math.abs(y - 128) / 128;
-    const d = Math.max(dx, dy);
-    let k = (d - 0.72) / 0.28 + bayer(x, y) * 0.3;
-    if (k <= 0) continue;
-    k = Math.min(1, Math.round(k * 3) / 3);
-    const i = (y * W + x) * 4;
-    img.data[i] = 255; img.data[i + 1] = 20; img.data[i + 2] = 10; img.data[i + 3] = Math.round(k * 170);
-  }
-  ctx.putImageData(img, 0, 0);
-  vigs.set(W, c);
-  return c;
+    const d = Math.pow(Math.pow(dx, 4) + Math.pow(dy, 4), 0.25);
+    const k = (d - 0.7) / 0.3;
+    return k > 0 ? k * k : 0;
+  }, [255, 24, 12], 140, 1);
+  vigs.set(W, vig);
+  return vig;
 }
 
 const fades: HTMLCanvasElement[] = [];
@@ -90,94 +106,75 @@ export function ditherFade(level: number): HTMLCanvasElement | null {
 
 const darkVigs = new Map<number, HTMLCanvasElement>();
 /**
- * Subtle dithered dark corners, always on, to focus the eye on the play area. On wide views the extra scenery
- * either side of the playfield is dimmed a little more towards the outer edges. Draw at x = -VIEW.ox.
+ * Soft dark corners, always on, to focus the eye on the play area. On wide views the extra scenery either side of
+ * the playfield is dimmed a little more towards the outer edges. Draw at x = -VIEW.ox.
  */
 export function darkVignette(): HTMLCanvasElement {
   const W = VIEW.w, ox = VIEW.ox;
   let c = darkVigs.get(W);
   if (c) return c;
-  const [cv, ctx] = makeCanvas(W, 256);
-  const img = ctx.createImageData(W, 256);
-  for (let y = 0; y < 256; y++) for (let x = 0; x < W; x++) {
+  c = paint(W, 256, (x, y) => {
     const px = x - ox; // playfield x
     const dx = (px - 160) / 160, dy = (y - 128) / 128;
     const d = Math.sqrt(Math.min(1.2, dx * dx) * 0.8 + dy * dy * 0.9);
-    let k = (d - 0.78) / 0.5;
-    // outside the playfield: ramp the dimming up with distance
+    let k = (d - 0.72) / 0.6;
     const out = px < 0 ? -px : px > 320 ? px - 320 : 0;
-    if (out > 0) k = Math.max(k, 0.15 + (out / Math.max(1, ox)) * 0.55);
-    k += bayer(x, y) * 0.25;
-    if (k <= 0) continue;
-    k = Math.min(1, Math.round(k * 4) / 4);
-    img.data[(y * W + x) * 4 + 3] = Math.round(k * 120);
-  }
-  ctx.putImageData(img, 0, 0);
-  darkVigs.set(W, cv);
-  return cv;
+    if (out > 0) k = Math.max(k, 0.12 + Math.pow(out / Math.max(1, ox), 1.3) * 0.6);
+    return Math.max(0, Math.min(1, k));
+  }, [0, 0, 6], 150, 1);
+  darkVigs.set(W, c);
+  return c;
 }
 
 const shaftCache = new Map<string, HTMLCanvasElement>();
-/** Volumetric light shafts slanting down from the top, quantised + dithered (additive). */
+/** Volumetric light shafts slanting down from the top (additive), with soft edges and dust-like streaks. */
 export function lightShafts(color: string, seed = 1): HTMLCanvasElement {
   const key = color + seed;
   let c = shaftCache.get(key);
   if (c) return c;
   const SW = 400 + MARGIN * 2;
-  const [cv, ctx] = makeCanvas(SW, 256);
-  const img = ctx.createImageData(SW, 256);
-  const v = parseInt(color.slice(1), 16);
-  const R = (v >> 16) & 255, G = (v >> 8) & 255, B = v & 255;
   const shafts: [number, number][] = [];
   const nS = Math.round(6 * SW / 400);
   for (let i = 0; i < nS; i++) shafts.push([((i * 71 + seed * 37) % (SW - 40)) + 20, 8 + ((i * 13 + seed) % 4) * 6]);
-  for (let y = 0; y < 256; y++) for (let x = 0; x < SW; x++) {
+  c = paint(SW, 256, (x, y) => {
     let k = 0;
     for (const [sx, w] of shafts) {
       const cx = sx - y * 0.45; // slant
       const d = Math.abs(x - cx) / (w + y * 0.06);
-      if (d < 1) k = Math.max(k, (1 - d) * (1 - y / 300));
+      if (d < 1) k += (1 - d * d) * (1 - d * d) * (1 - y / 300);
     }
-    if (k <= 0) continue;
-    const q = Math.round(k * 3 + bayer(x, y) * 0.9);
-    if (q <= 0) continue;
-    const i = (y * SW + x) * 4;
-    img.data[i] = R; img.data[i + 1] = G; img.data[i + 2] = B; img.data[i + 3] = q * 24;
-  }
-  ctx.putImageData(img, 0, 0);
-  shaftCache.set(key, cv);
-  return cv;
+    // fine streaks running along the slant
+    const streak = 0.8 + 0.2 * Math.sin((x + y * 0.45) * 0.9 + seed);
+    return Math.min(1, k * streak);
+  }, rgbOf(color), 80, 1);
+  shaftCache.set(key, c);
+  return c;
 }
 
 let coneC: HTMLCanvasElement | null = null;
 /** Searchlight cone pointing down (+y), apex at (60, 0). */
 export function searchCone(): HTMLCanvasElement {
   if (coneC) return coneC;
-  const [c, ctx] = makeCanvas(120, 220);
-  const img = ctx.createImageData(120, 220);
-  for (let y = 0; y < 220; y++) for (let x = 0; x < 120; x++) {
+  coneC = paint(120, 220, (x, y) => {
     const half = 3 + y * 0.24;
     const d = Math.abs(x - 60) / half;
-    if (d > 1) continue;
-    const k = (1 - d * d) * (1 - y / 240);
-    const q = Math.round(k * 3 + bayer(x, y) * 0.9);
-    if (q <= 0) continue;
-    const i = (y * 120 + x) * 4;
-    img.data[i] = 200; img.data[i + 1] = 230; img.data[i + 2] = 255; img.data[i + 3] = q * 30;
-  }
-  ctx.putImageData(img, 0, 0);
-  coneC = c;
-  return c;
+    if (d > 1) return 0;
+    return (1 - d * d) * (1 - d * d) * (1 - y / 240) * (0.85 + 0.15 * Math.cos(d * 9));
+  }, [200, 230, 255], 100);
+  return coneC;
 }
 
 let stripes: HTMLCanvasElement | null = null;
 export function hazardStripes(): HTMLCanvasElement {
   if (stripes) return stripes;
-  const [c, ctx] = makeCanvas(MAXW + 16, 8);
+  const [c, ctx] = hiCanvas(MAXW + 16, 8);
   for (let x = -8; x < MAXW + 16; x += 8) {
     ctx.fillStyle = (x / 8) % 2 === 0 ? '#ffcc00' : '#111111';
     ctx.beginPath(); ctx.moveTo(x, 8); ctx.lineTo(x + 8, 0); ctx.lineTo(x + 16, 0); ctx.lineTo(x + 8, 8); ctx.fill();
   }
+  // bevel: highlight top edge, shade bottom
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(0, 0, MAXW + 16, 1);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(0, 7, MAXW + 16, 1);
   stripes = c;
   return c;
 }

@@ -30,6 +30,9 @@ void main() {
   float l = dot(c, vec3(0.299, 0.587, 0.114));
   // saturated neon (high max channel) and bright whites both bloom; dull mid-tones do not
   float k = smoothstep(0.56, 0.98, m) * (0.55 + 0.45 * smoothstep(0.2, 0.8, l));
+  // big flat whites (panels, speech bubbles) bloom less than saturated neon
+  float sat = (m - min(c.r, min(c.g, c.b))) / max(m, 0.001);
+  k *= mix(0.55, 1.0, smoothstep(0.05, 0.35, sat));
   gl_FragColor = vec4(c * k, 1.0);
 }`;
 
@@ -63,6 +66,7 @@ uniform vec2 outSize;
 uniform float bloomAmt;
 uniform float crt;
 uniform float aberr;
+uniform float res;
 uniform vec4 waves[${MAX_WAVES}];
 varying vec2 uv;
 
@@ -92,7 +96,7 @@ void main() {
     if (w.w == 0.0) continue;
     vec2 d = p - w.xy;
     float dist = length(d);
-    float band = 7.0 + w.z * 0.18;
+    float band = (7.0 * res) + w.z * 0.18;
     float t = (dist - w.z) / band;
     if (abs(t) < 1.0 && dist > 0.001) {
       float k = sin(t * 3.14159) * (1.0 - t * t);
@@ -103,7 +107,7 @@ void main() {
 
   vec2 dc = q - 0.5;
   float edge = dot(dc, dc);
-  vec2 ab = dc * (0.6 + aberr) * (0.35 + edge * 2.5) / srcSize;
+  vec2 ab = dc * (0.6 + aberr) * res * (0.35 + edge * 2.5) / srcSize;
   vec3 col;
   col.r = texture2D(src, sharp(q + ab)).r;
   col.g = texture2D(src, sharp(q)).g;
@@ -120,9 +124,9 @@ void main() {
   col = (col - 0.5) * 1.04 + 0.5;
 
   if (crt > 0.5) {
-    float sy = q.y * srcSize.y;
+    float sy = q.y * srcSize.y / res;
     float scan = 0.62 + 0.38 * pow(0.5 + 0.5 * cos((sy - 0.5) * 6.28318), 1.4);
-    col *= mix(1.0, scan, clamp((outSize.y / srcSize.y - 1.5) / 2.0, 0.0, 1.0));
+    col *= mix(1.0, scan, clamp((outSize.y * res / srcSize.y - 1.5) / 2.0, 0.0, 1.0));
     float m = mod(gl_FragCoord.x, 3.0);
     vec3 mask = m < 1.0 ? vec3(1.08, 0.94, 0.94) : m < 2.0 ? vec3(0.94, 1.08, 0.94) : vec3(0.94, 0.94, 1.08);
     col *= mask * 1.12;
@@ -179,7 +183,7 @@ export class Presenter {
     mk('bright', FS_BRIGHT, ['src']);
     mk('blur', FS_BLUR, ['src', 'dir']);
     mk('copy', FS_COPY, ['src']);
-    mk('final', FS_FINAL, ['src', 'bloomA', 'bloomB', 'srcSize', 'outSize', 'bloomAmt', 'crt', 'aberr', 'waves']);
+    mk('final', FS_FINAL, ['src', 'bloomA', 'bloomB', 'srcSize', 'outSize', 'bloomAmt', 'crt', 'aberr', 'res', 'waves']);
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
@@ -250,9 +254,9 @@ export class Presenter {
       this.pass('blur', q1, q0.tex, (u) => gl.uniform2f(u.dir, 1.5 / q0.w, 0));
       this.pass('blur', q0, q1.tex, (u) => gl.uniform2f(u.dir, 0, 1.5 / q0.h));
     }
-    const wb = this.waveBuf;
+    const wb = this.waveBuf, res = h / 256;
     wb.fill(0);
-    postFx.waves.slice(0, MAX_WAVES).forEach((wv, i) => { wb[i * 4] = wv.x; wb[i * 4 + 1] = h - wv.y; wb[i * 4 + 2] = wv.r; wb[i * 4 + 3] = wv.s; });
+    postFx.waves.slice(0, MAX_WAVES).forEach((wv, i) => { wb[i * 4] = wv.x * res; wb[i * 4 + 1] = h - wv.y * res; wb[i * 4 + 2] = wv.r * res; wb[i * 4 + 3] = wv.s * res; });
     this.pass('final', null, this.srcTex, (u) => {
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, h0.tex); gl.uniform1i(u.bloomA, 1);
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, q0.tex); gl.uniform1i(u.bloomB, 2);
@@ -262,6 +266,7 @@ export class Presenter {
       gl.uniform1f(u.bloomAmt, o.bloom ? 0.8 * postFx.bloomBoost : 0);
       gl.uniform1f(u.crt, o.crt ? 1 : 0);
       gl.uniform1f(u.aberr, postFx.aberr);
+      gl.uniform1f(u.res, res);
       gl.uniform4fv(u.waves, wb);
     });
   }

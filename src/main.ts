@@ -1,20 +1,25 @@
 // Boot: offscreen game canvas + WebGL presenter, 50 Hz fixed-timestep loop with interpolated rendering.
 import { input } from './engine/input';
 import { audio } from './engine/audio';
-import { buildSprites } from './art/sprites';
-import { buildEnemies } from './game/enemies';
+import { buildSprites, S, SF } from './art/sprites';
+import { buildEnemies, ENEMIES } from './game/enemies';
 import { buildBossArt } from './game/bosses';
 import { Game } from './game/Game';
 import { text } from './engine/font';
 import { Presenter } from './engine/post';
 import { VIEW, setViewWidth } from './engine/view';
+import { RES } from './engine/gfx';
 
 const display = document.getElementById('screen') as HTMLCanvasElement;
-/** The game draws into this low-res canvas (VIEW.w × 256); the presenter scales it up to the window. */
+/**
+ * The game draws into this canvas in logical coordinates (VIEW.w × 256); its bitmap is RES× finer, and the presenter
+ * scales it up to the window.
+ */
 const canvas = document.createElement('canvas');
-canvas.width = 320; canvas.height = 256;
+canvas.width = 320 * RES; canvas.height = 256 * RES;
 let ctx = canvas.getContext('2d')!;
-ctx.imageSmoothingEnabled = false;
+const prep = () => { ctx.setTransform(RES, 0, 0, RES, 0, 0); ctx.imageSmoothingEnabled = false; };
+prep();
 const presenter = new Presenter(display);
 (window as any).postOk = presenter.ok;
 const wrapEl = document.getElementById('wrap')!;
@@ -35,11 +40,11 @@ function resize() {
     if (mode === 'integer' && s >= 1) s = Math.floor(s);
     setViewWidth(Math.floor(vw / s));
   }
-  if (canvas.width !== VIEW.w) {
-    canvas.width = VIEW.w;
+  if (canvas.width !== VIEW.w * RES) {
+    canvas.width = VIEW.w * RES;
     ctx = canvas.getContext('2d')!;
-    ctx.imageSmoothingEnabled = false;
   }
+  prep();
   const w = Math.min(vw, Math.round(VIEW.w * s)), h = Math.min(vh, Math.round(256 * s));
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   display.width = Math.round(w * dpr); display.height = Math.round(h * dpr);
@@ -49,7 +54,7 @@ function resize() {
   wrapEl.style.height = display.style.height;
   (document.getElementById('crt') as HTMLElement).style.backgroundSize = `100% ${Math.max(2, h / 256)}px`;
   const g = (window as any).game as Game | undefined;
-  if (g) { g.render(ctx, 1); present(); }
+  if (g) { prep(); g.render(ctx, 1); present(); }
 }
 function present() {
   const st = (window as any).game?.settings;
@@ -117,12 +122,13 @@ setTimeout(() => {
   buildSprites();
   buildEnemies();
   buildBossArt();
+  (window as any).__art = { S, SF, ENEMIES, canvas: () => canvas }; // debug: inspect generated art
   if (new URLSearchParams(location.search).get('gentest') === '1') { genTest(); return; }
   const game = new Game();
   (window as any).game = game;
   resize(); // apply the saved screen mode
   // test hook: advance the simulation synchronously (works even when the tab is hidden)
-  (window as any).step = (n: number) => { for (let i = 0; i < n; i++) { input.poll(); game.update(); } game.render(ctx, 1); present(); };
+  (window as any).step = (n: number) => { for (let i = 0; i < n; i++) { input.poll(); game.update(); } prep(); game.render(ctx, 1); present(); };
   const STEP = 1000 / 50;
   let last = performance.now(), acc = 0;
   const frame = (now: number) => {
@@ -133,7 +139,7 @@ setTimeout(() => {
       game.update();
       acc -= STEP;
     }
-    ctx.imageSmoothingEnabled = false;
+    prep();
     game.render(ctx, acc / STEP);
     present();
     requestAnimationFrame(frame);

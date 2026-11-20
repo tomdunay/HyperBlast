@@ -1,6 +1,6 @@
 // The Strikeblaster: movement, scenery collision/crush, dive, satellites and visible weapon attachments.
 import { S, SF, flashOf } from '../art/sprites';
-import { Ctx } from '../engine/gfx';
+import { Ctx, snap } from '../engine/gfx';
 import { ITEM, ItemId, PlayerState } from './items';
 import type { World } from './World';
 
@@ -93,7 +93,7 @@ export class Player {
 
   draw(ctx: Ctx, a: number, w: World) {
     if (this.dead) return;
-    const x = Math.round(this.ox + (this.x - this.ox) * a), y = Math.round(this.oy + (this.y - this.oy) * a);
+    const x = snap(this.ox + (this.x - this.ox) * a), y = snap(this.oy + (this.y - this.oy) * a);
     const diving = this.dive > 0;
     if (this.inv > 0 && !diving && this.inv % 4 < 2 && this.inv < 60) return;
     ctx.save();
@@ -110,7 +110,7 @@ export class Player {
     const f = SF.flame[(this.t >> 1) % 3];
     const fl = 1 + L('speed') * 0.25;
     const bo = Math.round(this.bank * 1.2);
-    for (const ex of [-6, 6]) ctx.drawImage(f, x + ex + bo - 3, y + 15, 6, Math.round(12 * fl));
+    for (const ex of [-6, 6]) ctx.drawImage(f, x + ex + bo - 3, y + 15, 6, snap(12 * fl));
     // behind hull
     if (L('wing')) { att(S.att_wing, -13, 6); att(S.att_wing, 13, 6, true); }
     if (L('side')) { att(S.att_side, -15, 2); att(S.att_side, 15, 2, true); if (L('side') > 1) { att(S.att_side, -15, 7); att(S.att_side, 15, 7, true); } }
@@ -149,7 +149,7 @@ export class Player {
     // satellites
     for (const s of this.sats) {
       const sp = s.kind === 'ball' ? SF.ball[(this.t >> 2) % 4] : S.drone;
-      ctx.drawImage(sp, Math.round(s.x - sp.width / 2), Math.round(s.y - sp.height / 2));
+      ctx.drawImage(sp, snap(s.x - sp.width / 2), snap(s.y - sp.height / 2));
     }
     // spawn shield bubble
     if (this.inv > 0 && !diving) {

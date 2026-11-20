@@ -352,7 +352,33 @@ The finished low-res frame goes to a WebGL presenter (`engine/post.ts`), which:
 
 Without WebGL, the game falls back to a plain nearest-neighbour blit.
 
-All of these layers are pre-rendered and cached per level. Rendering a frame costs about 1 ms in Chrome.
+### Art resolution
+
+Game logic runs in 320×256 logical pixels, but all art renders at twice that resolution (`RES` in `engine/gfx.ts`):
+
+- **Hi-res canvases.** A hi-res canvas carries its logical size in `.width`/`.height` (the real bitmap is
+  `._rw × ._rh`). `drawImage` is patched so these canvases draw at their logical size, which means game code never
+  needs to know the art resolution.
+- **Sprites.** The sprite builder (`SB`) renders every primitive at `RES` with 16-step colour ramps and fine
+  dithering. Ellipses get specular highlights and bounce light. Organic ramps get a bumpy, mottled surface, and metal
+  ramps get a chrome sky/ground reflection. Outlines and rim lights are thinner, and the ship is redesigned with more
+  panels, intakes and a framed canopy.
+- **Terrain.** The 1× height maps are sampled bilinearly at 2× for smooth contours. A soft two-pixel rim light and a
+  contact shadow run along the edges, plus micro-relief grain. Scenery scrolls smoothly at sub-pixel steps, and
+  sprites snap to the 2× grid.
+- **Backgrounds.** These are all smooth and anti-aliased: the copper-gradient sky, the defocused far silhouettes, the
+  near props, the foreground silhouettes (blurred for depth of field) and 12-frame caustics. The wall shadow has a
+  soft penumbra.
+- **Effects.** Glows have smooth falloff and white-hot cores. Explosions use feathered heat gradients with lit
+  billows, smoke is soft volumetric puffs, embers streak, and shockwave rings are anti-aliased. Ambient bubbles,
+  spores and embers are proper sprites, and scene changes fade smoothly.
+- **Text.** The 5×7 font is rasterised with smoothed diagonals, a continuous metallic gradient, a top lip and a soft
+  shadow. The logo is bevelled chrome.
+
+A level's scenery takes 1–3 s to build. It runs as a resumable generator (`Scroller.prepare`), a slice at a time, on
+the title screen, the level intro card, the stats screen and the shop. When play starts it is usually already done.
+
+All of these layers are pre-rendered and cached per level. Rendering a frame costs about 3.5 ms in Chrome.
 
 ## Architecture
 

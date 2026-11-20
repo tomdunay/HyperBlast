@@ -57,8 +57,8 @@ export function level4(): LevelDef {
     .wave(4, 'fleshpod', 4, 160, 'circle', { cy: 70, r: 50 }, 25);
   b.end('fleshforge');
   return b.build(3, 'BIOMECH FORTRESS', {
-    rock: ramp(['#08080c', '#22222e', '#44465a', '#70748c', '#a4aac0', '#e4e8f4'], 8),
-    alt: ramp(['#180408', '#4a1420', '#8a2a3a', '#c85a62', '#f4a8a0'], 8),
+    rock: ramp(['#08080c', '#22222e', '#44465a', '#70748c', '#a4aac0', '#e4e8f4'], 16),
+    alt: ramp(['#180408', '#4a1420', '#8a2a3a', '#c85a62', '#f4a8a0'], 16),
     bg: ['#08040a', '#1a0c14', '#08040a'],
     far: ramp(['#140a10', '#22121a', '#301a24', '#40222e'], 4),
     wobble: 0.08, tex: 'biomech', ambient: 'embers', ambientColor: 'rgba(255,140,90,0.5)',

@@ -1,6 +1,6 @@
 // Boss framework: huge multi-part bosses destroyed piece by piece, plus nine boss designs.
 import { renderShapes, Shape, Spr, flashOf } from '../art/sprites';
-import { charred, cracked, Ctx, rnd, recolor } from '../engine/gfx';
+import { charred, cracked, Ctx, rnd, recolor, snap } from '../engine/gfx';
 import { audio } from '../engine/audio';
 import type { World } from './World';
 
@@ -512,7 +512,7 @@ export class Boss {
     const d = this.def;
     const shakeX = this.state === 'dying' ? rnd(-2, 2) : 0;
     const drawPart = (p: PartRT) => {
-      const px = Math.round(x + p.def.x + shakeX), py = Math.round(y + p.def.y);
+      const px = snap(x + p.def.x + shakeX), py = snap(y + p.def.y);
       let s: Spr;
       if (p.dead) s = p.char;
       else if (p.spr.length > 1) {
@@ -531,12 +531,12 @@ export class Boss {
       if (!p.dead && p.hp < p.max * 0.45 && this.t % 6 === 0) w.fx.smoke(px + rnd(-6, 6), py);
     };
     for (const p of this.parts) if (p.def.under) drawPart(p);
-    ctx.drawImage(this.body, Math.round(x - d.w / 2 + shakeX), Math.round(y - d.h / 2));
+    ctx.drawImage(this.body, snap(x - d.w / 2 + shakeX), snap(y - d.h / 2));
     for (const p of this.parts) if (!p.def.under) drawPart(p);
     // beams
     for (const p of this.parts) {
       if (p.dead || p.beam <= 0) continue;
-      const bx = Math.round(x + p.def.x), by = Math.round(y + p.def.y + p.def.h / 2);
+      const bx = snap(x + p.def.x), by = snap(y + p.def.y + p.def.h / 2);
       if (p.beam >= 50) {
         if (p.beam % 4 < 2) { ctx.fillStyle = 'rgba(255,60,60,0.8)'; ctx.fillRect(bx, by, 1, 256 - by); }
       } else {

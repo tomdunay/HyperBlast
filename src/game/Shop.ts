@@ -1,5 +1,5 @@
 // Gorbo's Trade Hut: buy / sell (half price) / paid advice, with an animated sarcastic shopkeeper.
-import { Ctx, makeCanvas, rnd, bayer, fbm } from '../engine/gfx';
+import { Ctx, rnd, fbm, hiCanvas, realSize, RES } from '../engine/gfx';
 import { drawGlow } from '../engine/light';
 import { VIEW, fillView } from '../engine/view';
 import { input } from '../engine/input';
@@ -105,7 +105,7 @@ function buildArt() {
     { t: 'cyl', x: 0, y: -39, w: 2, h: 6, r: 'gold', z: 31 },
   ], true);
   icons = new Map();
-  const ic = (id: string, draw: (c: Ctx) => void) => { const [cv, c] = makeCanvas(32, 20); draw(c); icons!.set(id, cv); };
+  const ic = (id: string, draw: (c: Ctx) => void) => { const [cv, c] = hiCanvas(32, 20); draw(c); icons!.set(id, cv); };
   const put = (c: Ctx, s: Spr, x = 16, y = 10) => c.drawImage(s, Math.round(x - s.width / 2), Math.round(y - s.height / 2));
   ic('power', (c) => { put(c, S.b3, 10); put(c, S.b2, 16); put(c, S.b3, 22); });
   ic('spread', (c) => { put(c, S.att_spread, 10); put(c, S.spread, 20, 6); put(c, S.spread, 25, 10); });
@@ -352,17 +352,18 @@ export class Shop {
 let coneC: HTMLCanvasElement | null = null;
 function lampCone() {
   if (coneC) return coneC;
-  const [c, x] = makeCanvas(120, 90);
-  const img = x.createImageData(120, 90);
-  for (let y = 0; y < 90; y++) for (let px = 0; px < 120; px++) {
+  const [c, x] = hiCanvas(120, 90);
+  const [RW, RH] = realSize(c);
+  const img = x.createImageData(RW, RH);
+  for (let Y = 0; Y < RH; Y++) for (let X = 0; X < RW; X++) {
+    const px = (X + 0.5) / RES, y = (Y + 0.5) / RES;
     const half = 6 + y * 0.6;
     const d = Math.abs(px - 60) / half;
     if (d > 1) continue;
-    const k = (1 - d * 0.7) * (1 - y / 110);
-    const lvl = Math.round(k * 3 + bayer(px, y) * 0.9);
-    if (lvl <= 0) continue;
-    const i = (y * 120 + px) * 4;
-    img.data[i] = 120; img.data[i + 1] = 90; img.data[i + 2] = 40; img.data[i + 3] = lvl * 22;
+    const k = (1 - d * d) * (1 - d * 0.3) * (1 - y / 110);
+    if (k <= 0) continue;
+    const i = (Y * RW + X) * 4;
+    img.data[i] = 130; img.data[i + 1] = 96; img.data[i + 2] = 44; img.data[i + 3] = Math.round(k * 80);
   }
   x.putImageData(img, 0, 0);
   coneC = c;
@@ -371,16 +372,19 @@ function lampCone() {
 let counterC: HTMLCanvasElement | null = null;
 function counter() {
   if (counterC) return counterC;
-  const [c, x] = makeCanvas(136, 14);
-  const img = x.createImageData(136, 14);
+  const [c, x] = hiCanvas(136, 14);
+  const [RW, RH] = realSize(c);
+  const img = x.createImageData(RW, RH);
   const ramp = [[0x44, 0x22, 0x0c], [0x66, 0x38, 0x18], [0x88, 0x55, 0x28], [0xaa, 0x77, 0x44], [0xcc, 0x99, 0x5c], [0xee, 0xbb, 0x77]];
-  for (let y = 0; y < 14; y++) for (let px = 0; px < 136; px++) {
-    const grain = Math.sin(px * 0.09 + Math.sin(y * 0.9 + px * 0.02) * 2.5 + fbm(px * 0.05, y * 0.3, 2) * 5);
-    let l = 2.6 + grain * 0.9 - y * 0.18 + bayer(px, y) * 0.8;
-    if (y === 0) l = 5; else if (y === 1) l = 4;
-    if (y === 13) l = 0;
-    const col = ramp[Math.max(0, Math.min(5, Math.round(l)))];
-    const i = (y * 136 + px) * 4;
+  const at = (l: number) => { l = Math.max(0, Math.min(5, l)); const i = Math.min(4, Math.floor(l)), f = l - i; return ramp[i].map((v, k) => v + (ramp[i + 1][k] - v) * f); };
+  for (let Y = 0; Y < RH; Y++) for (let X = 0; X < RW; X++) {
+    const px = (X + 0.5) / RES, y = (Y + 0.5) / RES;
+    const grain = Math.sin(px * 0.09 + Math.sin(y * 0.9 + px * 0.02) * 2.5 + fbm(px * 0.05, y * 0.3, 2, 4) * 5);
+    let l = 2.6 + grain * 0.9 - y * 0.18 + (fbm(px * 0.6, y * 2, 9, 2) - 0.5) * 0.6;
+    if (y < 1) l = 5; else if (y < 2) l = 4.2;
+    if (y > 13) l = 0;
+    const col = at(l);
+    const i = (Y * RW + X) * 4;
     img.data[i] = col[0]; img.data[i + 1] = col[1]; img.data[i + 2] = col[2]; img.data[i + 3] = 255;
   }
   x.putImageData(img, 0, 0);

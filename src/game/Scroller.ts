@@ -1,7 +1,7 @@
 // Pre-renders a level's solid scenery from its tile grid (smoothed + noise for organic edges), keeps a pixel-accurate
 // collision mask, and draws: copper-bar sky → far silhouettes → near props → caustics → scenery shadow → foreground
 // (with stamped decorations) → additive running lights.
-import { makeCanvas, fbm, noise2, bayer, Ctx, RGB, RNG, hex } from '../engine/gfx';
+import { makeCanvas, hiCanvas, RES, realSize, snap, fbm, noise2, bayer, Ctx, RGB, RNG, hex } from '../engine/gfx';
 import { renderShapes, Shape } from '../art/sprites';
 import { glow } from '../engine/light';
 import { LevelDef, Theme, W, H, TILE, COLS } from './types';
@@ -38,39 +38,93 @@ export class Scroller {
   endY: number;
   static cache = new Map<LevelDef, Art>();
 
-  constructor(lv: LevelDef) {
+  constructor(lv: LevelDef, bare = false) {
     this.lv = lv;
     this.hpx = lv.rows.length * TILE;
     this.endY = this.hpx - H;
+    if (bare) return;
     let art = Scroller.cache.get(lv);
     if (!art) {
-      this.mask = new Uint8Array(W * this.hpx);
-      this.wide = new Uint8Array(FW * this.hpx);
-      this.lights = [];
-      this.buildFg();
-      art = {
-        fg: this.fg, mask: this.mask, bg: buildBackground(lv.theme), shadow: this.buildShadow(),
-        lights: this.lights, caustics: lv.theme.ambient === 'bubbles' ? buildCaustics() : [],
-      };
-      this.wide = new Uint8Array(0);
-      // wide scenery canvases are big: keep only the two most recently used levels
-      while (Scroller.cache.size >= 2) Scroller.cache.delete(Scroller.cache.keys().next().value!);
-    } else Scroller.cache.delete(lv);
-    Scroller.cache.set(lv, art);
+      // finish (or run) the level's art build now
+      const j = Scroller.job(lv);
+      let r = j.next();
+      while (!r.done) r = j.next();
+      art = r.value;
+      Scroller.jobs.delete(lv);
+    } else { Scroller.cache.delete(lv); Scroller.cache.set(lv, art); }
     Object.assign(this, art);
   }
 
-  private buildFg() {
+  /** In-progress incremental art builds (at most one at a time). */
+  private static jobs = new Map<LevelDef, Generator<undefined, Art>>();
+  private static job(lv: LevelDef) {
+    let j = Scroller.jobs.get(lv);
+    if (!j) {
+      Scroller.jobs.clear(); // drop any abandoned build: they hold large buffers
+      j = new Scroller(lv, true).gen();
+      Scroller.jobs.set(lv, j);
+    }
+    return j;
+  }
+  /**
+   * Advance a level's art build for up to `ms` milliseconds (call every tick from a loading-friendly scene, such as
+   * the level intro card or the title). Returns true once the art is ready, so constructing the Scroller is instant.
+   */
+  static prepare(lv: LevelDef, ms: number) {
+    if (Scroller.cache.has(lv)) return true;
+    const j = Scroller.job(lv);
+    const t0 = performance.now();
+    while (performance.now() - t0 < ms) if (j.next().done) { Scroller.jobs.delete(lv); return true; }
+    return false;
+  }
+
+  /** The full art build as a resumable generator: yields every few milliseconds of work. */
+  private *gen(): Generator<undefined, Art> {
+    const lv = this.lv;
+    this.mask = new Uint8Array(W * this.hpx);
+    this.wide = new Uint8Array(FW * this.hpx);
+    this.lights = [];
+    yield* this.buildFg();
+    const bg = yield* buildBackground(lv.theme);
+    yield;
+    const shadow = yield* this.buildShadow();
+    yield;
+    const caustics = lv.theme.ambient === 'bubbles' ? yield* buildCaustics() : [];
+    const art: Art = { fg: this.fg, mask: this.mask, bg, shadow, lights: this.lights, caustics };
+    this.wide = new Uint8Array(0);
+    // wide scenery canvases are big: keep only the two most recently used levels
+    while (Scroller.cache.size >= 2) Scroller.cache.delete(Scroller.cache.keys().next().value!);
+    Scroller.cache.set(lv, art);
+    return art;
+  }
+
+  private *buildFg(): Generator<undefined, void> {
     const lv = this.lv, th = lv.theme, Hp = this.hpx, nRows = lv.rows.length;
     const tileAt = (c: number, rTop: number) => {
       c = Math.max(0, Math.min(COLS - 1, c));
       rTop = Math.max(0, Math.min(nRows - 1, rTop));
       return lv.rows[nRows - 1 - rTop][c];
     };
+    // low-frequency noise terms are sampled on a coarse grid and interpolated (identical look, a fraction of the cost)
+    const coarse = (step: number, f: (px: number, py: number) => number) => {
+      const gw = Math.ceil(FW / step) + 2, gh = Math.ceil(Hp / step) + 2;
+      const g = new Float32Array(gw * gh);
+      for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) g[j * gw + i] = f(i * step - MW, j * step);
+      return (fxp: number, py: number) => {
+        const u = fxp / step, v = py / step, i = Math.floor(u), j = Math.floor(v), a = u - i, b = v - j, k = j * gw + i;
+        return (g[k] * (1 - a) + g[k + 1] * a) * (1 - b) + (g[k + gw] * (1 - a) + g[k + gw + 1] * a) * b;
+      };
+    };
+    const wingN = coarse(4, (x, y) => fbm(x * 0.018, y * 0.018, 57, 3));
+    const lumpN = coarse(2, (x, y) => fbm(x * 0.045, y * 0.045, 33, 3));
+    const strataN = coarse(6, (x, y) => fbm(x * 0.011, y * 0.011, 21, 2));
+    const aoN = coarse(3, (x, y) => fbm(x * 0.03, y * 0.03, 5, 2));
+    yield;
     // the field covers the playfield plus a margin either side; the margins continue the edge tiles and close up
     // into organic cave walls further out (purely visual: collision only uses the playfield part)
     const field = new Float32Array(FW * Hp);
     for (let py = 0; py < Hp; py++) {
+      if ((py & 31) === 31) yield;
       const ty = py / TILE - 0.5, r0 = Math.floor(ty), fy = ty - r0;
       for (let fxp = 0; fxp < FW; fxp++) {
         const px = fxp - MW;
@@ -79,7 +133,7 @@ export class Scroller {
         let v = (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
         if (px < 0 || px >= W) {
           const out = (px < 0 ? -px : px - W + 1) / MW;
-          const n = fbm(px * 0.018, py * 0.018, 57, 3);
+          const n = wingN(fxp, py);
           v = Math.max(v, Math.min(1, out * 1.5 + (n - 0.5) * 1.6 - 0.18));
         }
         if (th.wobble > 0 && v > 0.02 && v < 0.98) v += (fbm(px * 0.07, py * 0.07, 7, 2) - 0.5) * th.wobble * 2;
@@ -102,6 +156,7 @@ export class Scroller {
     const wide = this.wide;
     for (let i = 0; i < N; i++) dist[i] = wide[i] ? CAP : 0;
     for (let y = 1; y < Hp; y++) for (let x = 0; x < FW; x++) {
+      if (x === 0 && (y & 127) === 127) yield;
       const i = y * FW + x;
       if (!dist[i]) continue;
       let v = dist[i];
@@ -111,6 +166,7 @@ export class Scroller {
       dist[i] = v;
     }
     for (let y = Hp - 2; y >= 0; y--) for (let x = FW - 1; x >= 0; x--) {
+      if (x === 0 && (y & 127) === 0) yield;
       const i = y * FW + x;
       if (!dist[i]) continue;
       let v = dist[i];
@@ -120,9 +176,10 @@ export class Scroller {
       dist[i] = v;
     }
     // 3) height map: rounded bevel from the distance + embossed surface texture
-    const hmap = new Float32Array(N), texL = new Float32Array(N), texA = new Uint8Array(N);
+    const hmap = new Float32Array(N), texL = new Float32Array(N), texA = new Uint8Array(N), lowL = new Float32Array(N);
     const metal = th.tex === 'metal' || th.tex === 'biomech';
     for (let py = 0; py < Hp; py++) for (let fxp = 0; fxp < FW; fxp++) {
+      if (fxp === 0 && (py & 31) === 31) yield;
       const i = py * FW + fxp;
       if (!wide[i]) continue;
       const px = fxp - MW;
@@ -130,46 +187,99 @@ export class Scroller {
       texL[i] = t.l; texA[i] = t.alt ? 1 : 0;
       const d = Math.min(1, dist[i] / CAP);
       const dome = metal ? Math.min(1, d * 1.6) : 1 - (1 - d) * (1 - d);
-      const lump = metal ? 0 : (fbm(px * 0.045, py * 0.045, 33, 3) - 0.5) * 0.55 * Math.min(1, d * 2);
+      const lump = metal ? 0 : (lumpN(fxp, py) - 0.5) * 0.55 * Math.min(1, d * 2);
       hmap[i] = dome + lump + t.l * (metal ? 0.3 : 0.22);
+      // low-frequency light terms: large-scale strata / plates, and the deep interior receding into shadow
+      let low = (strataN(fxp, py) - 0.5) * 0.34;
+      if (d >= 1) low -= Math.min(0.2, Math.max(0, aoN(fxp, py) - 0.3) * 0.35);
+      lowL[i] = low;
     }
-    // 4) light it: Lambert from the upper left, specular on metal, ambient occlusion in the deep interior
-    const [cv, ctx] = makeCanvas(FW, Hp);
-    const img = ctx.createImageData(FW, Hp);
-    const out = new Uint32Array(img.data.buffer);
+    void texA;
+    // 4) light it at full art resolution: the 1× maps are sampled bilinearly (smooth contours and bevels), surface
+    //    texture and micro relief are evaluated per real pixel. Lambert from the upper left, specular highlights,
+    //    a soft rim light on edges facing the light and a contact shadow on the far side.
+    const r = RES, W2 = FW * r, H2 = Hp * r;
+    const [cv, ctx] = hiCanvas(FW, Hp);
     const pack = (c: RGB) => (0xff000000 | (c[2] << 16) | (c[1] << 8) | c[0]) >>> 0;
     const LL = Math.hypot(0.55, 0.7, 0.62), Lx = -0.55 / LL, Ly = -0.7 / LL, Lz = 0.62 / LL;
-    const K = metal ? 9 : 7;
-    for (let py = 1; py < Hp - 1; py++) {
-      for (let fxp = 1; fxp < FW - 1; fxp++) {
-        const i = py * FW + fxp;
-        if (!wide[i]) continue;
-        const px = fxp - MW;
-        const hx = (hmap[i + 1] - hmap[i - 1]) * K, hy = (hmap[i + FW] - hmap[i - FW]) * K;
-        const nl = Math.hypot(hx, hy, 1);
-        const lam = (-hx * Lx - hy * Ly + Lz) / nl;
-        let l = 0.06 + Math.max(0, lam) * 0.82;
-        l += texL[i] * 0.55;
-        // large-scale strata / plate variation
-        l += (fbm(px * 0.011, py * 0.011, 21, 2) - 0.5) * 0.34;
-        // deep interior recedes into shadow (ambient occlusion)
-        const d = dist[i] / CAP;
-        if (d >= 1) l -= Math.min(0.2, Math.max(0, fbm(px * 0.03, py * 0.03, 5, 2) - 0.3) * 0.35);
-        // specular: half-vector towards a viewer straight above
-        const hz = (-hx * Lx * 0.5 - hy * Ly * 0.5 + (Lz + 1) * 0.5) / nl;
-        if (hz > (metal ? 0.9 : 0.955)) l += metal ? 0.4 : 0.22;
-        const ramp = texA[i] ? th.alt : th.rock;
-        let idx = Math.round(l * (ramp.length - 1) + bayer(px, py) * 0.85);
-        // rim highlight on edges facing the light, dark contact line on the far side
-        const emptyUL = !wide[i - FW - 1] || !wide[i - FW] || !wide[i - 1];
-        const emptyDR = !wide[i + FW + 1] || !wide[i + FW] || !wide[i + 1];
-        if (emptyUL) idx = Math.max(idx, ramp.length - 1 - (((px + py) & 1) ? 1 : 0));
-        else if (emptyDR) idx = 0;
-        out[i] = pack(ramp[Math.max(0, Math.min(ramp.length - 1, idx))]);
+    const K = (metal ? 9 : 7) * r;
+    const fine = metal ? 0.006 : 0.035;
+    const gridTex = th.tex === 'metal';
+    // tileable micro-relief noise (128×128 real px), looked up instead of evaluated per pixel
+    const micro = new Float32Array(128 * 128);
+    {
+      const rng = new RNG(4242), raw = new Float32Array(128 * 128).map(() => rng.next() - 0.5);
+      // wrapped 3×3 blur: smooth, periodic high-frequency grain
+      for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+        let sum = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) sum += raw[(((y + dy) & 127) << 7) | ((x + dx) & 127)];
+        micro[(y << 7) | x] = sum / 9 * 2.4;
       }
     }
-    ctx.putImageData(img, 0, 0);
+    // bilinear sampling tables (real pixel -> 1× index + weight)
+    const xi = new Int32Array(W2), xw = new Float32Array(W2);
+    for (let X = 0; X < W2; X++) { const f = (X + 0.5) / r - 0.5; const i0 = Math.max(0, Math.min(FW - 2, Math.floor(f))); xi[X] = i0; xw[X] = Math.max(0, Math.min(1, f - i0)); }
+    const bil = (a: ArrayLike<number>, X: number, j0: number, wy: number) => {
+      const i = j0 * FW + xi[X], wx = xw[X];
+      const top = a[i] + (a[i + 1] - a[i]) * wx, bot = a[i + FW] + (a[i + FW + 1] - a[i + FW]) * wx;
+      return top + (bot - top) * wy;
+    };
+    const rowJ = (Y: number): [number, number] => { const f = (Y + 0.5) / r - 0.5; const j0 = Math.max(0, Math.min(Hp - 2, Math.floor(f))); return [j0, Math.max(0, Math.min(1, f - j0))]; };
+    // rolling 5-row window of field + height at real resolution
+    const RW = 5;
+    const fR = Array.from({ length: RW }, () => new Float32Array(W2)), hR = Array.from({ length: RW }, () => new Float32Array(W2));
+    const fillRow = (Y: number, f: Float32Array, h: Float32Array) => {
+      if (Y < 0 || Y >= H2) { f.fill(1); h.fill(1); return; }
+      const [j0, wy] = rowJ(Y);
+      for (let X = 0; X < W2; X++) {
+        const fv = bil(field, X, j0, wy);
+        f[X] = fv;
+        h[X] = fv > 0.45 ? bil(hmap, X, j0, wy) + micro[((Y & 127) << 7) | (X & 127)] * fine : 0;
+      }
+    };
+    for (let k = 0; k < RW; k++) fillRow(k - 2, fR[k], hR[k]);
+    const STRIP = 128;
+    const img = ctx.createImageData(W2, STRIP);
+    const out = new Uint32Array(img.data.buffer);
+    for (let Y = 0; Y < H2; Y++) {
+      if ((Y & 15) === 15) yield;
+      if (Y > 0) { // advance the window: rows Y-2..Y+2
+        const f0 = fR.shift()!, h0 = hR.shift()!;
+        fillRow(Y + 2, f0, h0);
+        fR.push(f0); hR.push(h0);
+      }
+      const sy = Y % STRIP;
+      if (sy === 0) out.fill(0);
+      const [fU2, fU, fC, fD, fD2] = fR, [, hU, hC, hD] = hR;
+      const [j0, wy] = rowJ(Y);
+      const ly = (Y + 0.5) / r - 0.5;
+      for (let X = 1; X < W2 - 1; X++) {
+        if (fC[X] <= 0.5) continue;
+        const lx = (X + 0.5) / r - 0.5 - MW;
+        const hx = (hC[X + 1] - hC[X - 1]) * K, hy = (hD[X] - hU[X]) * K;
+        const nl = Math.sqrt(hx * hx + hy * hy + 1);
+        const lam = (-hx * Lx - hy * Ly + Lz) / nl;
+        // machined themes evaluate their (cheap, crisp) texture per real pixel; noise themes reuse the 1× texture
+        const t = gridTex ? texture(th, Math.floor(lx), Math.floor(ly))
+          : { l: bil(texL, X, j0, wy), alt: texA[Math.min(Hp - 1, Math.round(ly)) * FW + Math.min(FW - 1, Math.round(lx + MW))] === 1 };
+        let l = 0.06 + Math.max(0, lam) * 0.82 + t.l * 0.55 + bil(lowL, X, j0, wy);
+        // specular: half-vector towards a viewer straight above
+        const hz = (-hx * Lx * 0.5 - hy * Ly * 0.5 + (Lz + 1) * 0.5) / nl;
+        if (metal) { const q = Math.max(0, hz - 0.82) / 0.18; l += q * q * 0.45; }
+        else { const q = Math.max(0, hz - 0.92) / 0.08; l += q * q * 0.24; }
+        const ramp = t.alt ? th.alt : th.rock, n = ramp.length - 1;
+        let idx = l * n + bayer(X, Y) * 0.5;
+        // rim highlight on edges facing the light, dark contact line on the far side (2 real px, fading)
+        if (fU[X] <= 0.5 || fC[X - 1] <= 0.5 || fU[X - 1] <= 0.5) idx = Math.max(idx, n - 2);
+        else if (fU2[X] <= 0.5 || fC[X - 2] <= 0.5 || fU[X - 2] <= 0.5) idx = Math.max(idx, n - 4.5);
+        else if (fD[X] <= 0.5 || fC[X + 1] <= 0.5 || fD[X + 1] <= 0.5) idx = 0;
+        else if (fD2[X] <= 0.5 || fC[X + 2] <= 0.5) idx = Math.min(idx, idx * 0.4);
+        out[sy * W2 + X] = pack(ramp[Math.max(0, Math.min(n, Math.round(idx)))]);
+      }
+      if (sy === STRIP - 1 || Y === H2 - 1) ctx.putImageData(img, 0, Y - sy, 0, 0, W2, sy + 1);
+    }
     this.fg = cv;
+    yield;
     this.stampDecor(ctx);
   }
 
@@ -229,26 +339,38 @@ export class Scroller {
     this.lights.sort((a, b) => a.y - b.y);
   }
 
-  /** Dithered drop shadow of the scenery cast down-right onto the background layers. */
-  private buildShadow(): HTMLCanvasElement {
+  /** Soft drop shadow of the scenery cast down-right onto the background layers (penumbra widens with distance). */
+  private *buildShadow(): Generator<undefined, HTMLCanvasElement> {
     const Hp = this.hpx, m = this.wide;
     const [c, ctx] = makeCanvas(FW, Hp);
     const img = ctx.createImageData(FW, Hp);
-    const d = new Uint32Array(img.data.buffer);
-    const dark = (0xb4 << 24) >>> 0 | 0x0a0004;
-    const light = (0x70 << 24) >>> 0 | 0x0a0004;
-    for (let y = 9; y < Hp; y++) for (let x = 7; x < FW; x++) {
+    const d = img.data;
+    // summed-area table of the solid mask for fast box averages
+    const SW = FW + 1;
+    const sat = new Uint32Array(SW * (Hp + 1));
+    yield;
+    for (let y = 0; y < Hp; y++) { let row = 0; for (let x = 0; x < FW; x++) { row += m[y * FW + x]; sat[(y + 1) * SW + x + 1] = sat[y * SW + x + 1] + row; } }
+    const box = (x0: number, y0: number, x1: number, y1: number) => {
+      x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(FW, x1); y1 = Math.min(Hp, y1);
+      if (x1 <= x0 || y1 <= y0) return 0;
+      return (sat[y1 * SW + x1] - sat[y0 * SW + x1] - sat[y1 * SW + x0] + sat[y0 * SW + x0]) / ((x1 - x0) * (y1 - y0));
+    };
+    for (let y = 0; y < Hp; y++) for (let x = 0; x < FW; x++) {
+      if (x === 0 && (y & 63) === 63) yield;
       const i = y * FW + x;
-      if (m[i] || !m[(y - 9) * FW + x - 7]) continue;
-      // softer outer band
-      const inner = m[(y - 12) * FW + Math.max(0, x - 10)];
-      d[i] = inner ? dark : ((x + y) & 1 ? light : 0);
+      if (m[i]) continue;
+      // tight contact shadow + wide soft shadow
+      const a = box(x - 9, y - 11, x - 4, y - 6) * 0.55 + box(x - 15, y - 18, x - 3, y - 4) * 0.4;
+      if (a <= 0.01) continue;
+      d[i * 4] = 6; d[i * 4 + 1] = 0; d[i * 4 + 2] = 14; d[i * 4 + 3] = Math.round(Math.min(1, a) * 215);
     }
     ctx.putImageData(img, 0, 0);
     return c;
   }
 
   private topRow(scroll: number) { return this.hpx - H - Math.round(scroll); }
+  /** render-time top row: snapped to the art-resolution grid so the scenery scrolls smoothly */
+  private drawTop(scroll: number) { return this.hpx - H - snap(scroll); }
 
   solid(sx: number, sy: number) {
     sx |= 0;
@@ -275,16 +397,16 @@ export class Scroller {
     const s = this.scrollAt(alpha);
     const th = this.lv.theme;
     const c0 = hex(th.bg[0]), c1 = hex(th.bg[1]);
-    for (let y = 0; y < H; y += 2) {
+    for (let y = 0; y < H; y += 1) {
       const k = Math.sin((y / H) * Math.PI);
       const bar = Math.pow(Math.max(0, Math.sin((y + s * 0.15) * 0.045 + t * 0.012)), 10) * 0.55;
       const r = c0[0] + (c1[0] - c0[0]) * k, g = c0[1] + (c1[1] - c0[1]) * k, b = c0[2] + (c1[2] - c0[2]) * k;
-      const q = (v: number, add: number) => Math.min(255, Math.round((v + add) / 17) * 17);
+      const q = (v: number, add: number) => Math.min(255, Math.round(v + add));
       ctx.fillStyle = `rgb(${q(r, r * bar + 18 * bar)},${q(g, g * bar + 24 * bar)},${q(b, b * bar + 40 * bar)})`;
-      ctx.fillRect(-VIEW.ox, y, VIEW.w, 2);
+      ctx.fillRect(-VIEW.ox, y, VIEW.w, 1);
     }
     const tile = (img: HTMLCanvasElement, f: number) => {
-      const off = Math.round((s * f) % BH);
+      const off = snap((s * f) % BH);
       for (let y = off - BH; y < H; y += BH) ctx.drawImage(img, -MW, y);
     };
     tile(this.bg, 0.35);
@@ -293,9 +415,9 @@ export class Scroller {
     if (!near) { near = buildNear(th); nearCache.set(nk, near); }
     tile(near, 0.7);
     if (this.caustics.length) {
-      const f = this.caustics[Math.floor(t / 6) % this.caustics.length];
+      const f = this.caustics[Math.floor(t / 4) % this.caustics.length];
       ctx.globalCompositeOperation = 'lighter';
-      this.tileCaustics(ctx, f, Math.round((s * 0.7) % 256));
+      this.tileCaustics(ctx, f, snap((s * 0.7) % 256));
       ctx.globalCompositeOperation = 'source-over';
     }
   }
@@ -310,20 +432,24 @@ export class Scroller {
     const k = themeKey(th);
     let fore = foreCache.get(k);
     if (!fore) { fore = buildFore(th); foreCache.set(k, fore); }
-    const off = Math.round((this.scrollAt(alpha) * 1.45) % BH);
+    const off = snap((this.scrollAt(alpha) * 1.45) % BH);
     for (let y = off - BH; y < H; y += BH) ctx.drawImage(fore, -VIEW.ox, y);
   }
-  drawShadow(ctx: Ctx, alpha: number) { this.blit(ctx, this.shadow, alpha); }
+  drawShadow(ctx: Ctx, alpha: number) {
+    ctx.imageSmoothingEnabled = true;
+    this.blit(ctx, this.shadow, alpha);
+    ctx.imageSmoothingEnabled = false;
+  }
   drawFg(ctx: Ctx, alpha: number) { this.blit(ctx, this.fg, alpha); }
   private blit(ctx: Ctx, c: HTMLCanvasElement, alpha: number) {
-    const top = this.topRow(this.scrollAt(alpha));
+    const top = this.drawTop(this.scrollAt(alpha));
     const sy = Math.max(0, top), dy = sy - top;
     const h = Math.min(H - dy, this.hpx - sy);
     if (h > 0) ctx.drawImage(c, MW - VIEW.ox, sy, VIEW.w, h, -VIEW.ox, dy, VIEW.w, h);
   }
   /** Additive running lights embedded in the scenery, plus caustic shimmer over the walls. */
   drawLights(ctx: Ctx, alpha: number, t: number) {
-    const top = this.topRow(this.scrollAt(alpha));
+    const top = this.drawTop(this.scrollAt(alpha));
     ctx.globalCompositeOperation = 'lighter';
     for (const L of this.lights) {
       const y = L.y - top;
@@ -337,8 +463,8 @@ export class Scroller {
     }
     if (this.caustics.length) {
       ctx.globalAlpha = 0.45;
-      const f = this.caustics[(Math.floor(t / 6) + 3) % this.caustics.length];
-      this.tileCaustics(ctx, f, Math.round(this.scrollAt(alpha) % 256));
+      const f = this.caustics[(Math.floor(t / 4) + 5) % this.caustics.length];
+      this.tileCaustics(ctx, f, snap(this.scrollAt(alpha) % 256));
       ctx.globalAlpha = 1;
     }
     ctx.globalCompositeOperation = 'source-over';
@@ -483,18 +609,10 @@ function cached(k: string, f: () => { edge: Decor[]; inner: Decor[] }) {
   return v;
 }
 
-/** Crisp (non-antialiased) alpha so path-drawn layers stay pixel art. */
-function harden(ctx: Ctx, w: number, h: number) {
-  const img = ctx.getImageData(0, 0, w, h);
-  const d = img.data;
-  for (let i = 3; i < d.length; i += 4) d[i] = d[i] >= 110 ? 255 : 0;
-  ctx.putImageData(img, 0, 0);
-}
-
 /** Near-FOREGROUND silhouettes (1.45x parallax) hugging the screen edges, drawn over everything but the HUD. */
 export function buildFore(th: Theme): HTMLCanvasElement {
   const W = VIEW.w; // built per view width so the silhouettes always hug the visible edges
-  const [c, ctx] = makeCanvas(W, BH);
+  const [c, ctx] = hiCanvas(W, BH);
   const rng = new RNG(7 + th.tex.length * 3);
   const dark = `rgb(${th.far[0].map((v) => Math.round(v * 0.5)).join(',')})`;
   const rimC = th.rock[th.rock.length - 3];
@@ -516,17 +634,24 @@ export function buildFore(th: Theme): HTMLCanvasElement {
     for (const off of [0, BH, -BH]) {
       ctx.fillStyle = rim;
       ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x + dir, y + off - 1) : ctx.moveTo(x + dir, y + off - 1))); ctx.fill();
-      ctx.fillStyle = dark;
+      // dark body with a gentle gradient towards the screen edge
+      const g = ctx.createLinearGradient(x0, 0, x0 + dir * depth, 0);
+      g.addColorStop(0, `rgb(${th.far[0].map((v) => Math.round(v * 0.3)).join(',')})`); g.addColorStop(1, dark);
+      ctx.fillStyle = g;
       ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y + off) : ctx.moveTo(x, y + off))); ctx.fill();
     }
   }
-  harden(ctx, W, BH);
-  return c;
+  // depth of field: these shapes are right in front of the camera, so they are out of focus
+  const [c2, ctx2] = hiCanvas(W, BH);
+  ctx2.setTransform(1, 0, 0, 1, 0, 0);
+  ctx2.filter = `blur(${RES * 1.2}px)`;
+  ctx2.drawImage(c, 0, 0, ...realSize(c));
+  return c2;
 }
 
 /** Near-background prop layer (0.7x parallax), transparent except for theme props. */
 function buildNear(th: Theme): HTMLCanvasElement {
-  const [c, ctx] = makeCanvas(FW, BH);
+  const [c, ctx] = hiCanvas(FW, BH);
   ctx.translate(MW, 0);
   // props hug the view edges; wide views also get extra props out in the margins
   const L = -VIEW.ox, R = W + VIEW.ox, extra = Math.round(VIEW.ox / 40);
@@ -590,73 +715,90 @@ function buildNear(th: Theme): HTMLCanvasElement {
       }
       break;
   }
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  harden(ctx, FW, BH);
   return c;
 }
 
-function buildBackground(th: Theme): HTMLCanvasElement {
-  const [c, ctx] = makeCanvas(FW, BH);
-  const img = ctx.createImageData(FW, BH);
-  const d = new Uint32Array(img.data.buffer);
+function* buildBackground(th: Theme): Generator<undefined, HTMLCanvasElement> {
+  const r = RES;
+  const [c, ctx] = hiCanvas(FW, BH);
+  const [RW, RH] = realSize(c);
+  const img = ctx.createImageData(RW, RH);
+  const d = img.data;
   const far = th.far;
+  const farAt = (v: number): RGB => {
+    const t = Math.max(0, Math.min(1, v)) * (far.length - 1), i = Math.min(far.length - 2, Math.floor(t)), f = t - i;
+    return [0, 1, 2].map((k) => far[i][k] + (far[i + 1][k] - far[i][k]) * f) as RGB;
+  };
   // periodic noise: blend sample at y and y-BH
   const pn = (x: number, y: number, s: number, seed: number) => {
     const t = y / BH;
     return fbm(x * s, y * s, seed, 3) * (1 - t) + fbm(x * s, (y - BH) * s, seed, 3) * t;
   };
-  for (let y = 0; y < BH; y++)
-    for (let fx = 0; fx < FW; fx++) {
-      const x = fx - MW;
-      let v: number;
+  for (let Y = 0; Y < RH; Y++)
+    for (let X = 0; X < RW; X++) {
+      if (X === 0 && (Y & 15) === 15) yield;
+      const y = (Y + 0.5) / r, x = (X + 0.5) / r - MW;
+      let v: number, a = 1;
       switch (th.tex) {
         case 'metal': {
-          const gx = (x + 8) % 64, gy = y % 48;
-          v = gx < 3 || gy < 2 ? 0.75 : pn(x, y, 0.02, 3) > 0.6 ? 0.55 : -1;
-          if (gx > 20 && gx < 44 && gy > 10 && gy < 38) v = (gy & 3) === 0 ? 0.5 : 0.3;
+          const gx = (((x + 8) % 64) + 64) % 64, gy = y % 48;
+          v = gx < 3 || gy < 2 ? 0.75 - (gx < 1 || gy < 0.5 ? 0 : 0.2) : pn(x, y, 0.02, 3) > 0.6 ? 0.5 : -1;
+          if (gx > 20 && gx < 44 && gy > 10 && gy < 38) v = (gy % 4) < 1 ? 0.55 : 0.3 + (gx - 20) / 24 * 0.1;
           break;
         }
         case 'biomech': {
           const n = pn(x, y, 0.025, 4);
-          const pipe = Math.abs(((x + 40 + Math.sin((y * Math.PI * 6) / BH) * 20) % 80) - 40);
-          v = pipe < 6 ? 0.8 - pipe * 0.08 : n > 0.55 ? (n - 0.55) * 4 : -1;
+          const pipe = Math.abs((((x + 40 + Math.sin((y * Math.PI * 6) / BH) * 20) % 80) + 80) % 80 - 40);
+          if (pipe < 6) v = 0.85 - pipe * 0.1 + (pipe < 2 ? 0.1 : 0);
+          else { v = (n - 0.55) * 4; a = Math.max(0, Math.min(1, (n - 0.55) / 0.02)); }
           break;
         }
         default: {
           const n = pn(x, y, 0.018, 5);
           const edge = Math.max(-0.25, Math.min(x, W - x) / W);
-          v = n + (0.3 - edge) * 0.9 > 0.62 ? (n - 0.4) * 2 : -1;
+          const sdf = n + (0.3 - edge) * 0.9 - 0.62;
+          v = (n - 0.4) * 2 + Math.max(0, 0.04 - sdf) * 4; // brighter rim at the silhouette edge
+          a = Math.max(0, Math.min(1, sdf / 0.015 + 0.5));
         }
       }
-      if (v < 0) continue;
-      const idx = Math.max(0, Math.min(far.length - 1, Math.round(v * (far.length - 1) + bayer(x, y))));
-      const col = far[idx];
-      d[y * FW + fx] = (0xff000000 | (col[2] << 16) | (col[1] << 8) | col[0]) >>> 0;
+      if (v < 0 || a <= 0) continue;
+      const col = farAt(v);
+      const i = (Y * RW + X) * 4;
+      d[i] = col[0]; d[i + 1] = col[1]; d[i + 2] = col[2]; d[i + 3] = Math.round(a * 255);
     }
   ctx.putImageData(img, 0, 0);
-  return c;
+  // slight defocus: it is far away
+  const [c2, ctx2] = hiCanvas(FW, BH);
+  ctx2.setTransform(1, 0, 0, 1, 0, 0);
+  ctx2.filter = 'blur(0.8px)';
+  ctx2.drawImage(c, 0, 0, RW, RH);
+  return c2;
 }
 
-/** Animated underwater caustic light pattern (8 frames, 160x128, drawn 2x). */
-function buildCaustics(): HTMLCanvasElement[] {
+/** Animated underwater caustic light pattern (12 frames, 320x256 logical, art resolution). */
+function* buildCaustics(): Generator<undefined, HTMLCanvasElement[]> {
   const out: HTMLCanvasElement[] = [];
-  for (let f = 0; f < 8; f++) {
-    const [c, ctx] = makeCanvas(160, 128);
-    const img = ctx.createImageData(160, 128);
-    const ph = (f / 8) * Math.PI * 2;
-    for (let y = 0; y < 128; y++) for (let x = 0; x < 160; x++) {
-      // frequencies are whole cycles per tile so the pattern wraps seamlessly
+  const NF = 12;
+  for (let f = 0; f < NF; f++) {
+    const [c, ctx] = hiCanvas(320, 256);
+    const [RW, RH] = realSize(c);
+    const img = ctx.createImageData(RW, RH);
+    const ph = (f / NF) * Math.PI * 2;
+    for (let Y = 0; Y < RH; Y++) for (let X = 0; X < RW; X++) {
+      // tile is 160x128 logical cells; frequencies are whole cycles per tile so the pattern wraps seamlessly
+      const x = (X + 0.5) / RES / 2, y = (Y + 0.5) / RES / 2;
       const T = Math.PI * 2, fx = T / 160, fy = T / 128;
       const a = Math.sin(x * fx * 3 + Math.sin(y * fy + ph) * 2.2 + ph);
       const b = Math.sin(y * fy * 3 + Math.sin(x * fx * 2 - ph) * 2.0 - ph);
       const v = 1 - Math.abs(a + b) * 0.5;
-      const k = v > 0.9 ? 2 : v > 0.8 && ((x + y) & 1) ? 1 : 0;
-      if (!k) continue;
-      const i = (y * 160 + x) * 4;
-      img.data[i] = 60; img.data[i + 1] = 150; img.data[i + 2] = 190; img.data[i + 3] = k === 2 ? 70 : 40;
+      const k = Math.max(0, (v - 0.72) / 0.28);
+      if (k <= 0) continue;
+      const i = (Y * RW + X) * 4;
+      img.data[i] = 70; img.data[i + 1] = 170; img.data[i + 2] = 210; img.data[i + 3] = Math.round(k * k * 70);
     }
     ctx.putImageData(img, 0, 0);
     out.push(c);
+    yield;
   }
   return out;
 }

@@ -58,8 +58,8 @@ export function level3(): LevelDef {
     .wall(3, 'eggsac', 'L').wall(3, 'eggsac', 'R');
   b.end('vinemaw');
   return b.build(2, 'OVERGROWN HIVE', {
-    rock: ramp(['#040c04', '#123012', '#245a1c', '#4a8a2a', '#9ccc4a', '#eaffa8'], 8),
-    alt: ramp(['#0c040e', '#2c1236', '#58246a', '#8a4a9c', '#c890d8'], 8),
+    rock: ramp(['#040c04', '#123012', '#245a1c', '#4a8a2a', '#9ccc4a', '#eaffa8'], 16),
+    alt: ramp(['#0c040e', '#2c1236', '#58246a', '#8a4a9c', '#c890d8'], 16),
     bg: ['#020a04', '#0a2010', '#020a04'],
     far: ramp(['#06180a', '#0c2610', '#123418', '#1a4220'], 4),
     wobble: 0.26, tex: 'vine', ambient: 'spores', ambientColor: 'rgba(220,255,120,0.5)',

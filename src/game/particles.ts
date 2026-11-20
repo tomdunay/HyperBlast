@@ -1,7 +1,7 @@
 // Layered explosions (flash → fireball → smoke → embers), debris, material sparks, shockwaves, floating text.
 import { Pool } from '../engine/pool';
 import { SF } from '../art/sprites';
-import { Ctx, rnd } from '../engine/gfx';
+import { Ctx, rnd, snap, hiCanvas, realSize, fbm, RES } from '../engine/gfx';
 import { text } from '../engine/font';
 import { glow } from '../engine/light';
 
@@ -11,24 +11,35 @@ export interface Particle {
   t: number; life: number; size: number; color: string; world: boolean; str: string; delay: number;
 }
 
-const SMOKE_COLS = ['#5a5560', '#4a4650', '#3a3740', '#2a2830'];
-const puffs = new Map<string, HTMLCanvasElement>();
-/** Pixel smoke puff: solid core with a checker-dithered rim, cached by radius + colour. */
-function puff(r: number, col: string) {
-  const key = r + col;
-  let c = puffs.get(key);
-  if (c) return c;
-  const s = r * 2 + 1;
-  c = document.createElement('canvas'); c.width = c.height = s;
-  const ctx = c.getContext('2d')!;
-  ctx.fillStyle = col;
-  for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
-    const d = Math.hypot(x - r, y - r) / (r + 0.5);
-    if (d > 1 || (d > 0.7 && (x + y) & 1)) continue;
-    ctx.fillRect(x, y, 1, 1);
+const puffs: HTMLCanvasElement[] = [];
+/**
+ * Soft volumetric smoke puffs at art resolution: billowy noise shape, lit from the upper left, feathered edges.
+ * A few variants are cached at radius 8 and scaled when drawn.
+ */
+function puff(i: number) {
+  if (!puffs.length) {
+    for (let v = 0; v < 4; v++) {
+      const R = 8, S = R * 2 + 2;
+      const [c, ctx] = hiCanvas(S, S);
+      const [W, Hh] = realSize(c);
+      const img = ctx.createImageData(W, Hh);
+      const d = img.data;
+      for (let Y = 0; Y < Hh; Y++) for (let X = 0; X < W; X++) {
+        const x = (X + 0.5) / RES - S / 2, y = (Y + 0.5) / RES - S / 2;
+        const n = fbm(x * 0.28 + v * 9, y * 0.28, 50 + v, 4);
+        const dd = Math.hypot(x, y) / R + (0.5 - n) * 0.55;
+        if (dd >= 1) continue;
+        const lit = 0.55 + (fbm((x + 1.2) * 0.28 + v * 9, (y + 1.2) * 0.28, 50 + v, 4) - n) * -3 - (x + y) / R * 0.18;
+        const a = Math.min(1, (1 - dd) * 2.2);
+        const L = Math.max(0.15, Math.min(1, lit));
+        const o = (Y * W + X) * 4;
+        d[o] = 90 * L + 20; d[o + 1] = 86 * L + 18; d[o + 2] = 96 * L + 24; d[o + 3] = Math.round(a * 235);
+      }
+      ctx.putImageData(img, 0, 0);
+      puffs.push(c);
+    }
   }
-  puffs.set(key, c);
-  return c;
+  return puffs[i & 3];
 }
 
 export class FX {
@@ -135,47 +146,60 @@ export class FX {
       switch (p.kind) {
         case 'smoke': {
           const k = p.t / p.life;
-          const col = SMOKE_COLS[Math.min(3, Math.floor(k * 4))];
-          // dithered puff: solid core + checker rim
-          const s = puff(Math.max(1, Math.round(p.size * (1 - k * 0.3))), col);
-          ctx.drawImage(s, Math.round(x - s.width / 2), Math.round(y - s.height / 2));
+          const s = puff(p.life | 0), r = Math.max(1, p.size * (1 - k * 0.3)) * 1.25;
+          ctx.globalAlpha = Math.min(1, (1 - k) * 1.6) * 0.85;
+          ctx.imageSmoothingEnabled = true;
+          ctx.drawImage(s, x - r, y - r, r * 2, r * 2);
+          ctx.imageSmoothingEnabled = false;
+          ctx.globalAlpha = 1;
           break;
         }
         case 'exp': {
           const frames = p.size === 0 ? SF.expS : p.size === 1 ? SF.expM : SF.expL;
           const f = frames[Math.min(frames.length - 1, Math.floor(p.t / 3))];
-          ctx.drawImage(f, Math.round(x - f.width / 2), Math.round(y - f.height / 2));
+          ctx.drawImage(f, snap(x - f.width / 2), snap(y - f.height / 2));
           break;
         }
-        case 'debris':
+        case 'debris': {
+          // tumbling chip: a lit face and a dark edge
+          const sz = p.size * 0.8, k = (p.t * 0.4) % 2 < 1;
           ctx.fillStyle = p.color;
-          ctx.fillRect(Math.round(x), Math.round(y), p.size, p.size);
+          ctx.fillRect(snap(x), snap(y), sz, k ? sz : sz * 0.5);
+          ctx.fillStyle = 'rgba(0,0,0,0.45)';
+          ctx.fillRect(snap(x), snap(y) + (k ? sz : sz * 0.5) - 0.5, sz, 0.5);
           break;
+        }
         case 'trail': {
           const k = p.t / p.life;
           ctx.fillStyle = k < 0.2 ? '#ffffcc' : k < 0.45 ? '#ffbb44' : k < 0.7 ? '#cc5522' : '#552233';
-          const s = k < 0.5 ? p.size : 1;
-          ctx.fillRect(Math.round(x), Math.round(y), s, s);
+          const s = (k < 0.5 ? p.size : 1) * 0.75;
+          ctx.fillRect(snap(x - s / 2), snap(y - s / 2), s, s);
           break;
         }
         case 'ember': {
           const k = p.t / p.life;
-          ctx.fillStyle = k < 0.3 ? '#ffffaa' : k < 0.6 ? '#ffaa33' : '#cc4411';
-          ctx.fillRect(Math.round(x), Math.round(y), 1, 1);
-          ctx.fillStyle = 'rgba(255,120,40,0.5)';
-          ctx.fillRect(Math.round(x - p.vx), Math.round(y - p.vy), 1, 1);
+          // streak along the velocity: hot head, fading tail
+          ctx.strokeStyle = k < 0.3 ? '#ffffaa' : k < 0.6 ? '#ffaa33' : '#cc4411';
+          ctx.lineWidth = 0.75;
+          ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - p.vx * 1.6, y - p.vy * 1.6); ctx.stroke();
+          ctx.fillStyle = '#ffffee';
+          ctx.fillRect(snap(x) - 0.5, snap(y) - 0.5, 1, 1);
+          ctx.lineWidth = 1;
           break;
         }
         case 'spark': {
           const f = SF.spark[Math.min(2, Math.floor(p.t / 3))];
-          ctx.drawImage(f, Math.round(x - f.width / 2), Math.round(y - f.height / 2));
+          ctx.drawImage(f, snap(x - f.width / 2), snap(y - f.height / 2));
           break;
         }
         case 'ring': {
-          const r = 4 + p.t * 3;
-          ctx.strokeStyle = `rgba(255,${200 - p.t * 6},120,${1 - p.t / p.life})`;
-          ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.arc(Math.round(x), Math.round(y), r, 0, Math.PI * 2); ctx.stroke();
+          const r = 4 + (p.t + a) * 3, k = p.t / p.life;
+          ctx.strokeStyle = `rgba(255,${200 - p.t * 6},120,${(1 - k) * 0.9})`;
+          ctx.lineWidth = 2.5 * (1 - k) + 0.5;
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+          ctx.strokeStyle = `rgba(255,255,230,${(1 - k) * 0.7})`;
+          ctx.lineWidth = 0.75;
+          ctx.beginPath(); ctx.arc(x, y, r - 1, 0, Math.PI * 2); ctx.stroke();
           ctx.lineWidth = 1;
           break;
         }
@@ -207,7 +231,7 @@ export class FX {
       const k = 1 - p.t / p.life;
       const r = p.kind === 'flash' ? p.size * 2.2 : [26, 46, 80][p.size] * (0.5 + k * 0.5);
       const g = glow(Math.round(r / 4) * 4, p.kind === 'flash' ? '#ffeecc' : '#ff8833', Math.max(0.25, Math.round(k * 4) / 4) * 1.05);
-      ctx.drawImage(g, Math.round(x - g.width / 2), Math.round(y - g.height / 2));
+      ctx.drawImage(g, snap(x - g.width / 2), snap(y - g.height / 2));
     }
   }
 
@@ -224,7 +248,7 @@ export class FX {
         case 'trail': if (p.t < 5) g = glow(3, '#ff9933', 0.7); break;
         case 'spark': g = glow(4, '#ffee88'); break;
       }
-      if (g) ctx.drawImage(g, Math.round(x - g.width / 2), Math.round(y - g.height / 2));
+      if (g) ctx.drawImage(g, snap(x - g.width / 2), snap(y - g.height / 2));
     }
   }
 }

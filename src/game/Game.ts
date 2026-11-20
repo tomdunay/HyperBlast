@@ -1,16 +1,17 @@
 // Top-level state machine: Title (+attract demo, hi-scores, credits) → Intro → Play ⇄ Shop → … → GameOver / Ending → Name entry.
-import { Ctx, makeCanvas, rnd, fbm, bayer } from '../engine/gfx';
+import { Ctx, likeCanvas, hiCanvas, realSize, RES, rnd, fbm } from '../engine/gfx';
 import { input, REMAPPABLE, DEFAULT_BINDINGS, Action } from '../engine/input';
 import { audio } from '../engine/audio';
 import { text, makeLogo, wrap, FontStyle } from '../engine/font';
 import { S, SF } from '../art/sprites';
-import { ditherFade, drawGlow } from '../engine/light';
+import { drawGlow } from '../engine/light';
 import { buildLevel, LEVEL_COUNT, hexSeed, LevelMode } from '../levels';
 import { ensureBossArt } from './bosses';
 import { LevelDef, W, H } from './types';
 import { VIEW, MARGIN, fillView } from '../engine/view';
 import { postFx } from '../engine/post';
 import { World, Host } from './World';
+import { Scroller } from './Scroller';
 import { Shop } from './Shop';
 import { PlayerState } from './items';
 import { comboRank, gameOverLine, levelQuip, pauseLine, statsLine, titleTag } from './sauce';
@@ -49,6 +50,8 @@ export class Game {
     this.fadeT = 16;
   }
   world: World | null = null;
+  /** level whose scenery is being pre-built in the background */
+  prefetch: LevelDef | null = null;
   players: PlayerState[] = [];
   cur = 0;
   debug: boolean;
@@ -64,7 +67,7 @@ export class Game {
     const qs = q.get('seed');
     if (qs && /^[0-9a-fA-F]{1,8}$/.test(qs)) { this.settings.levelMode = 'random'; this.settings.seed = parseInt(qs, 16) >>> 0; }
     this.logo = makeLogo('HYPERBLAST', 4);
-    this.logoFx = makeCanvas(this.logo.width, this.logo.height);
+    this.logoFx = likeCanvas(this.logo);
     this.applySettings();
     if (q.get('level') || qs) this.startGame();
     else this.toTitle();
@@ -99,6 +102,12 @@ export class Game {
     this.t++;
     if (this.fadeT > 0) this.fadeT--;
     this.scene.update();
+    // build the next level's scenery a slice at a time while menus, cards and the shop are on screen
+    if (this.prefetch && !(this.scene instanceof PlayScene) && Scroller.prepare(this.prefetch, this.scene instanceof IntroScene ? 15 : 10)) {
+      this.prefetch = null;
+      // on the title, once the attract level is ready, get the first level ready too so START is quick
+      if (this.scene instanceof TitleScene) { const lv = this.getLevel(this.startLevel); if (!Scroller.cache.has(lv)) this.prefetch = lv; }
+    }
   }
   render(ctx: Ctx, a: number) {
     postFx.waves = []; postFx.aberr = 0; postFx.bloomBoost = 1;
@@ -108,8 +117,7 @@ export class Game {
     ctx.translate(VIEW.ox, 0);
     this.scene.render(ctx, a);
     ctx.restore();
-    const f = ditherFade(this.fadeT);
-    if (f) ctx.drawImage(f, 0, 0);
+    if (this.fadeT > 0) { ctx.fillStyle = `rgba(0,0,0,${(this.fadeT / 16) ** 1.5})`; ctx.fillRect(0, 0, VIEW.w, H); }
   }
 
   // ------------------------------------------------------------ flow
@@ -174,6 +182,7 @@ export class Game {
     const ps = this.ps;
     if (ps.level >= LEVEL_COUNT - 1) { this.scene = new EndingScene(this); return; }
     const w = this.world!;
+    this.prefetch = this.getLevel(ps.level + 1);
     this.scene = new StatsScene(this, w, () => {
       this.scene = new ShopScene(new Shop(ps, ps.level * 2 + 1, true, () => {
         ps.level++; ps.checkpoint = 0; ps.midDone = false;
@@ -200,25 +209,31 @@ export class Game {
 // =================================================================== scenes
 const STAR_COLS = ['#ffffff', '#ccddff', '#8899cc', '#556688', '#334455'];
 let spaceC: HTMLCanvasElement | null = null;
-/** Deep-space backdrop: dark gradient with dithered, 12-bit quantised nebula clouds (wraps every 64 px sideways). */
+/** Deep-space backdrop: dark gradient with smooth, layered nebula clouds and dust lanes (wraps every 64 px sideways). */
 function spaceBackdrop() {
   if (spaceC) return spaceC;
   const w = 320 + MARGIN * 2 + 64;
-  const [c, x] = makeCanvas(w, H);
-  const img = x.createImageData(w, H);
+  const [c, x] = hiCanvas(w, H);
+  const [RW, RH] = realSize(c);
+  const img = x.createImageData(RW, RH);
   const d = img.data;
   const P = 512; // horizontal period of the cloud noise so the drift wraps
-  for (let y = 0; y < H; y++) for (let px = 0; px < w; px++) {
+  const per = (u: number, y: number, sx: number, sy: number, seed: number, oct: number) =>
+    fbm(u * sx, y * sy, seed, oct) * (1 - u / P) + fbm((u - P) * sx, y * sy, seed, oct) * (u / P);
+  for (let Y = 0; Y < RH; Y++) for (let X = 0; X < RW; X++) {
+    const px = (X + 0.5) / RES, y = (Y + 0.5) / RES;
     const u = px % P;
-    const n = fbm(u * 0.012, y * 0.016, 41, 4) * (1 - u / P) + fbm((u - P) * 0.012, y * 0.016, 41, 4) * (u / P);
-    const m = fbm(u * 0.03 + 9, y * 0.03, 77, 3);
-    const k = Math.max(0, n - 0.42) * 2.6 + bayer(px, y) * 0.12;
+    const n = per(u, y, 0.012, 0.016, 41, 5);
+    const m = per(u, y, 0.03, 0.03, 77, 3);
+    const lane = per(u, y, 0.05, 0.02, 13, 4); // dark dust lanes cutting through the glow
+    let k = Math.max(0, n - 0.4) * 2.4;
+    k *= 1 - Math.max(0, lane - 0.55) * 1.8;
+    const hot = Math.max(0, n - 0.62) * 4; // bright cores
     const g = y / H;
     let r = 2 + g * 16, gg = 1 + g * 4, b = 10 + g * 26;
-    r += k * (90 * m + 40); gg += k * 30 * (1 - m); b += k * (140 - 60 * m);
-    const q = (v: number) => Math.min(255, Math.round(v / 17) * 17);
-    const i = (y * w + px) * 4;
-    d[i] = q(r); d[i + 1] = q(gg); d[i + 2] = q(b); d[i + 3] = 255;
+    r += k * (90 * m + 40) + hot * 120; gg += k * 30 * (1 - m) + hot * 60; b += k * (140 - 60 * m) + hot * 90;
+    const i = (Y * RW + X) * 4;
+    d[i] = Math.min(255, r); d[i + 1] = Math.min(255, gg); d[i + 2] = Math.min(255, b); d[i + 3] = 255;
   }
   x.putImageData(img, 0, 0);
   spaceC = c;
@@ -234,8 +249,18 @@ function drawStars(ctx: Ctx, t: number) {
     const px = 160 + (sx / z) * 70, py = 128 + (sy / z) * 70;
     if (px < -VIEW.ox || py < 0 || px >= W + VIEW.ox || py >= H) continue;
     ctx.fillStyle = STAR_COLS[Math.min(4, Math.floor(z * 5))];
-    const s = z < 0.2 ? 2 : 1;
-    ctx.fillRect(Math.round(px), Math.round(py), s, s);
+    const s = z < 0.15 ? 1.5 : z < 0.45 ? 1 : 0.5;
+    ctx.fillRect(px - s / 2, py - s / 2, s, s);
+    if (z < 0.3) {
+      // near stars: a soft glow and a short motion streak away from the centre
+      ctx.globalCompositeOperation = 'lighter';
+      drawGlow(ctx, px, py, 3 + (0.3 - z) * 10, '#88aaff', 0.6);
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = '#aabbff'; ctx.lineWidth = s * 0.6;
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px - (px - 160) * 0.06, py - (py - 128) * 0.06); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
   }
 }
 
@@ -244,11 +269,23 @@ const COPPER = [
   ['#000022', '#112266', '#2255bb', '#55aaff', '#ddffff', '#55aaff', '#2255bb', '#112266'],
   ['#002200', '#115511', '#22aa33', '#77ee66', '#eeffcc', '#77ee66', '#22aa33', '#115511'],
 ];
-/** Amiga copper raster bars. */
+/** Amiga copper raster bars: smooth tubes of light with a hot core and an additive halo. */
 function copperBars(ctx: Ctx, t: number, y0: number, span: number) {
   COPPER.forEach((bar, i) => {
-    const y = Math.round(y0 + Math.sin(t * 0.035 + i * 2.1) * span);
-    bar.forEach((c, k) => { ctx.fillStyle = c; ctx.fillRect(-VIEW.ox, y + k * 2, VIEW.w, 2); });
+    const y = y0 + Math.sin(t * 0.035 + i * 2.1) * span;
+    const g = ctx.createLinearGradient(0, y, 0, y + 16);
+    bar.forEach((c, k) => g.addColorStop(k / 8 + 1 / 16, c));
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(-VIEW.ox, y, VIEW.w, 16);
+    ctx.globalCompositeOperation = 'lighter';
+    const hg = ctx.createLinearGradient(0, y - 10, 0, y + 26);
+    hg.addColorStop(0, 'rgba(0,0,0,0)'); hg.addColorStop(0.5, bar[3] + '55'); hg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hg;
+    ctx.fillRect(-VIEW.ox, y - 10, VIEW.w, 36);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(-VIEW.ox, y + 7.5, VIEW.w, 0.5);
+    ctx.globalCompositeOperation = 'source-over';
   });
 }
 
@@ -270,12 +307,23 @@ class TitleScene implements Scene {
   g: Game; t = 0; sel = 0; idle = 0; phase: 'menu' | 'scores' | 'demo' = 'menu';
   demo: World | null = null;
   items = ['START GAME', 'OPTIONS', 'HALL OF FAME'];
-  constructor(g: Game) { this.g = g; audio.playMusic('title'); }
+  demoLv: { lv: LevelDef; idx: number };
+  constructor(g: Game) {
+    this.g = g; audio.playMusic('title');
+    this.demoLv = this.pickDemo();
+  }
+  /** every attract loop shows a freshly generated level from a random seed; pre-build it while the menu idles */
+  pickDemo() {
+    const idx = Math.floor(Math.random() * 15);
+    const d = { idx, lv: getLevelFor(idx, 'random', (Math.random() * 2 ** 32) >>> 0) };
+    this.g.prefetch = d.lv;
+    return d;
+  }
   update() {
     this.t++; this.idle++;
     if (this.phase === 'demo') {
       this.demo!.update();
-      if (input.anyPressed || this.demo!.t > 1800 || this.demo!.state !== 'play') { this.demo = null; this.phase = 'menu'; this.idle = 0; audio.playMusic('title'); }
+      if (input.anyPressed || this.demo!.t > 1800 || this.demo!.state !== 'play') { this.demo = null; this.phase = 'menu'; this.idle = 0; audio.playMusic('title'); this.demoLv = this.pickDemo(); }
       return;
     }
     if (input.anyPressed) this.idle = 0;
@@ -292,10 +340,8 @@ class TitleScene implements Scene {
   startDemo() {
     const ps = new PlayerState(1);
     ps.load.power = 3; ps.load.side = 1; ps.load.homing = 1; ps.load.spread = 1;
-    // every attract loop shows a freshly generated level from a random seed
-    const lv = Math.floor(Math.random() * 15);
-    ps.level = lv;
-    this.demo = new World(getLevelFor(lv, 'random', (Math.random() * 2 ** 32) >>> 0), ps, this.g.makeHost(true));
+    ps.level = this.demoLv.idx;
+    this.demo = new World(this.demoLv.lv, ps, this.g.makeHost(true));
   }
   choose() {
     audio.play('select');
@@ -426,7 +472,7 @@ class OptionsScene implements Scene {
   }
   render(ctx: Ctx) {
     drawStars(ctx, this.t);
-    text(ctx, 'OPTIONS', 160, 24, 'gold', 2, 0.5);
+    text(ctx, 'OPTIONS', 160, 14, 'gold', 2, 0.5);
     this.rows().forEach(([k, v], i) => {
       const s = i === this.sel;
       const y = 36 + i * 14;
@@ -493,10 +539,15 @@ class IntroScene implements Scene {
   quip: string;
   constructor(private g: Game, private ps: PlayerState, private done: () => void) {
     audio.stopMusic();
-    this.name = g.getLevel(ps.level).name; // build (and cache) the level during the card
+    const lv = g.getLevel(ps.level); // build (and cache) the level during the card
+    this.name = lv.name;
+    g.prefetch = lv;
     this.quip = levelQuip(this.name);
   }
-  update() { if (++this.t > 190 || (this.t > 30 && (input.p('fire') || input.p('confirm')))) this.done(); }
+  update() {
+    // the card stays up until the level's scenery has finished building in the background (fire skips the wait)
+    if ((++this.t > 190 && this.g.prefetch === null) || this.t > 600 || (this.t > 30 && (input.p('fire') || input.p('confirm')))) this.done();
+  }
   render(ctx: Ctx) {
     drawStars(ctx, this.t * 3);
     const lv = this.ps.level;

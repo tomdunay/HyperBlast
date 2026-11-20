@@ -58,8 +58,8 @@ export function level2(): LevelDef {
     .wall(4, 'sporepod', 'L').wall(4, 'sporepod', 'R');
   b.end('mothersp');
   return b.build(1, 'FOSSIL CAVERNS', {
-    rock: ramp(['#0e0a06', '#3a2c1e', '#6e5a40', '#a8926c', '#d8c8a4', '#fff8e4'], 8),
-    alt: ramp(['#100808', '#3a2420', '#6a4a3a', '#9a7a5a', '#cab08a'], 8),
+    rock: ramp(['#0e0a06', '#3a2c1e', '#6e5a40', '#a8926c', '#d8c8a4', '#fff8e4'], 16),
+    alt: ramp(['#100808', '#3a2420', '#6a4a3a', '#9a7a5a', '#cab08a'], 16),
     bg: ['#0c0806', '#1e140c', '#0c0806'],
     far: ramp(['#18100a', '#261a10', '#342416', '#42301e'], 4),
     wobble: 0.2, tex: 'bone', ambient: 'dust', ambientColor: 'rgba(220,200,160,0.4)',

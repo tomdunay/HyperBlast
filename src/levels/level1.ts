@@ -67,8 +67,8 @@ export function level1(): LevelDef {
     .wave(4, 'tadpole', 10, 160, 'sine', { a: 70, s: 1.0 }, 10);
   b.end('carcinox');
   return b.build(0, 'PRIMORDIAL SEA', {
-    rock: ramp(['#060818', '#123040', '#1f5a55', '#3f8f6e', '#8fcf99', '#e8ffd8'], 8),
-    alt: ramp(['#1a0610', '#4a1a2a', '#94394a', '#d9736a', '#ffd2bd'], 8),
+    rock: ramp(['#060818', '#123040', '#1f5a55', '#3f8f6e', '#8fcf99', '#e8ffd8'], 16),
+    alt: ramp(['#1a0610', '#4a1a2a', '#94394a', '#d9736a', '#ffd2bd'], 16),
     bg: ['#00101f', '#002a48', '#00101f'],
     far: ramp(['#001c30', '#002c48', '#083c5c', '#104c6a'], 4),
     wobble: 0.24, tex: 'coral', ambient: 'bubbles', ambientColor: 'rgba(170,230,255,0.55)',
